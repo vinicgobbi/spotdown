@@ -32,6 +32,10 @@ type options struct {
 	save       bool
 	login      bool
 	logout     bool
+	install    bool
+	addPath    bool
+	update     bool
+	checkUpd   bool
 	version    bool
 	vars       bool
 }
@@ -58,6 +62,10 @@ func parseFlags(o *options) (urls []string) {
 	fs.BoolVar(&o.dryRun, "dry-run", false, "só listar as faixas e os caminhos que seriam gerados, sem baixar")
 	fs.BoolVar(&o.login, "login", false, "entrar com a conta do Spotify (playlists suas ou colaborativas sem o limite de 100 faixas) e sair")
 	fs.BoolVar(&o.logout, "logout", false, "apagar o login do Spotify e sair")
+	fs.BoolVar(&o.install, "install", false, "instalar este binário em ~/.local/bin (no PATH, sem sudo) e sair")
+	fs.BoolVar(&o.addPath, "add-to-path", false, "com --install: acrescentar ~/.local/bin ao PATH no arquivo do shell sem perguntar")
+	fs.BoolVar(&o.update, "update", false, "baixar e instalar a versão mais nova e sair")
+	fs.BoolVar(&o.checkUpd, "check-update", false, "só verificar se há versão nova e sair")
 	fs.BoolVar(&o.save, "save-config", false, "gravar as opções passadas por flag no arquivo de configuração")
 	fs.BoolVar(&o.vars, "vars", false, "listar as variáveis do template e sair")
 	fs.BoolVar(&o.version, "version", false, "mostrar a versão e sair")
@@ -143,6 +151,23 @@ func run() int {
 
 	env := &cli.Env{UI: ui.New(), Cfg: o.cfg, File: file, ConfigPath: o.configPath, Version: version}
 
+	if o.install || o.update || o.checkUpd {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		var err error
+		switch {
+		case o.install:
+			err = cli.Install(env, o.addPath)
+		default:
+			err = cli.CheckUpdate(ctx, env, o.update)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
+			return 1
+		}
+		return 0
+	}
+
 	if o.login || o.logout {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -165,6 +190,7 @@ func run() int {
 			return 2
 		}
 		env.CheckTools(context.Background())
+		cli.AutoCheckUpdate(env)
 		if err := cli.Interactive(env); err != nil {
 			fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
 			return 1
@@ -177,7 +203,11 @@ func run() int {
 	if created {
 		env.UI.Hint("configuração criada em %s", o.configPath)
 	}
+	cli.AutoCheckUpdate(env)
 	fin, err := cli.Download(ctx, env, urls, cli.DownloadOptions{DryRun: o.dryRun})
+	if env.UpdateAvailable != "" {
+		env.UI.Hint("spotdown %s disponível (este é %s): spotdown --update", env.UpdateAvailable, version)
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return 130

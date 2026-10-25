@@ -19,6 +19,27 @@ Spotify (páginas públicas)  →  YouTube Music (busca)  →  yt-dlp + ffmpeg  
 - **yt-dlp recente.** O YouTube muda com frequência, e versões antigas, como a dos repositórios das distros, falham com "Please sign in". Use `pipx install yt-dlp` ou o binário oficial de <https://github.com/yt-dlp/yt-dlp/releases>, e mantenha atualizado com `yt-dlp -U`. O spotdown avisa quando a versão tem mais de 120 dias.
 - **ffmpeg** no PATH.
 
+## Instalação
+
+Baixe o binário da [última release](https://github.com/vinicgobbi/spotdown/releases/latest) (`spotdown-linux-amd64` ou `spotdown-linux-arm64`) e instale no seu PATH, sem sudo:
+
+```sh
+chmod +x spotdown-linux-amd64
+./spotdown-linux-amd64 --install          # copia para ~/.local/bin/spotdown
+./spotdown-linux-amd64 --install --add-to-path   # e acrescenta ao PATH sem perguntar
+```
+
+Se `~/.local/bin` não estiver no PATH, o `--install` pergunta antes de acrescentar a linha ao arquivo do seu shell (`~/.zshrc`, `~/.bashrc` ou `config.fish`). Na interface, a mesma ação fica em **Sistema › Instalar no PATH**, que some depois de instalado.
+
+### Atualizações
+
+```sh
+spotdown --check-update   # mostra se há versão nova e o que mudou
+spotdown --update         # baixa, confere o SHA-256 publicado e troca o binário
+```
+
+Na interface, use **Sistema › Procurar atualizações**. O spotdown também confere sozinho, no máximo uma vez por dia, e avisa: na linha do topo da interface, ou ao fim de um download pelo terminal. Ele nunca se atualiza sem você pedir. A atualização troca o binário instalado em `~/.local/bin`, ou o próprio binário em uso, se não houver instalação, e vale a partir da próxima execução. Versões de desenvolvimento (`dev`) não se atualizam.
+
 ## Uso
 
 ```sh
@@ -147,5 +168,7 @@ go build -o spotdown ./cmd/spotdown
 | `internal/ui` | prompts (huh) e saída formatada, iguais aos do deploy-tools |
 | `internal/tui` | barra lateral + painel (bubbletea) |
 | `internal/cli` | ações: download, opções e sistema |
+| `internal/install` | instalação em `~/.local/bin` e no PATH |
+| `internal/update` | releases do GitHub, SHA-256 e changelog |
 
 Os commits seguem Conventional Commits. A cada push na `main`, o workflow de release gera a versão com commitizen e publica os binários estáticos.

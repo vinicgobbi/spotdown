@@ -23,7 +23,8 @@ func testEnv(t *testing.T, answers string) (*Env, *bytes.Buffer) {
 	}
 	cfg.OutputDir = "/musica"
 	u := &ui.UI{In: strings.NewReader(answers), Out: &out, Interactive: true, Accessible: true}
-	return &Env{UI: u, Cfg: cfg, File: cfg, ConfigPath: path, Version: "test"}, &out
+	return &Env{UI: u, Cfg: cfg, File: cfg, ConfigPath: path, Version: "test",
+		UpdateStamp: filepath.Join(t.TempDir(), "update-check")}, &out
 }
 
 func reload(t *testing.T, env *Env) config.Config {

@@ -41,7 +41,6 @@ func onOff(b bool) string {
 
 // App monta a TUI.
 func App(env *Env) tui.App {
-	text := func(s string) func() string { return func() string { return s } }
 	return tui.App{
 		Title: "spotdown " + env.Version,
 		Subtitle: func() string {
@@ -52,155 +51,208 @@ func App(env *Env) tui.App {
 			switch {
 			case env.ToolsErr != nil:
 				return env.ToolsErr.Error() + " — veja Sistema › Dependências"
+			case env.UpdateAvailable != "":
+				return "spotdown " + env.UpdateAvailable + " disponível (este é " + env.Version + ") — Sistema › Procurar atualizações"
 			case env.ToolsWarn != "":
 				return env.ToolsWarn
 			}
 			return ""
 		},
-		Sections: []tui.Section{
-			{Title: "Baixar", Items: []tui.Item{
-				{
-					Label: "Baixar links",
-					Run:   func(ctx context.Context) error { return iDownload(ctx, env, false) },
-					Desc: func() string {
-						return "Baixa faixas, álbuns e playlists do Spotify: cole um ou mais links (um por linha).\n\n" +
-							"Os metadados vêm do Spotify, o áudio do YouTube Music (a versão mais parecida em título, " +
-							"artistas e duração) e cada arquivo sai com tags, capa e letra.\n\n" +
-							tui.Capture(env.UI, func() { settingsKV(env) })
-					},
-					CLI: "spotdown [opções] LINK...",
+		Sections: sections(env),
+		Rebuild:  func() []tui.Section { return sections(env) },
+	}
+}
+
+// sections monta a barra lateral; "Instalar no PATH" só aparece enquanto
+// este binário não estiver instalado.
+func sections(env *Env) []tui.Section {
+	text := func(s string) func() string { return func() string { return s } }
+	var setup []tui.Item
+	if !env.Installed() {
+		setup = append(setup, installItem(env))
+	}
+	setup = append(setup, updateItem(env))
+	return []tui.Section{
+		{Title: "Baixar", Items: []tui.Item{
+			{
+				Label: "Baixar links",
+				Run:   func(ctx context.Context) error { return iDownload(ctx, env, false) },
+				Desc: func() string {
+					return "Baixa faixas, álbuns e playlists do Spotify: cole um ou mais links (um por linha).\n\n" +
+						"Os metadados vêm do Spotify, o áudio do YouTube Music (a versão mais parecida em título, " +
+						"artistas e duração) e cada arquivo sai com tags, capa e letra.\n\n" +
+						tui.Capture(env.UI, func() { settingsKV(env) })
 				},
-				{
-					Label: "Simular caminhos",
-					Run:   func(ctx context.Context) error { return iDownload(ctx, env, true) },
-					Desc: text("Lê os links e mostra o caminho que cada faixa teria, sem baixar nada. " +
-						"Bom para testar um template novo numa playlist de verdade."),
-					CLI: "spotdown --dry-run LINK...",
-				},
-			}},
-			{Title: "Opções", Items: []tui.Item{
-				{
-					Label: "Caminho dos arquivos",
-					Run:   func(context.Context) error { return iPath(env) },
-					Desc: func() string {
-						c := env.Cfg
-						return "Onde e com que nome cada faixa é salva, com as mesmas variáveis do spotdl.\n\n" +
-							tui.Capture(env.UI, func() {
-								env.UI.KV(
-									[2]string{"Pasta base", Tilde(pathtpl.ExpandPath(c.OutputDir))},
-									[2]string{"Template", c.Output},
-									[2]string{"Caracteres", c.Restrict},
-									[2]string{"Exemplo", Tilde(previewPath(env, c))},
-								)
-							}) + "\n\n" + varsText()
-					},
-					CLI: `spotdown --output-dir DIR -o "{artist}/{album}/{track-number:02} - {title}" --restrict none|ascii|strict LINK`,
-				},
-				{
-					Label: "Formato e qualidade",
-					Run:   func(context.Context) error { return iFormat(env) },
-					Desc: func() string {
-						return fmt.Sprintf("Formato atual: %s, qualidade %s.\n\n", env.Cfg.Format, env.Cfg.Bitrate) +
-							"opus e m4a vêm direto do YouTube, sem reconverter (melhor qualidade por tamanho). " +
-							"mp3 é o mais compatível. flac não ganha qualidade: o áudio de origem já é com perdas."
-					},
-					CLI: "spotdown --format mp3|m4a|opus|flac|ogg --bitrate auto|320k LINK",
-				},
-				{
-					Label: "Playlists M3U",
-					Run:   func(context.Context) error { return iM3U(env) },
-					Desc: func() string {
-						c := env.Cfg
-						s := "Gera um .m3u8 para cada álbum e cada playlist baixados (faixas soltas não geram), " +
-							"na ordem original. Faixas que não baixaram entram como comentário.\n\n"
-						if !c.M3U {
-							return s + "Desligado."
-						}
-						return s + tui.Capture(env.UI, func() {
+				CLI: "spotdown [opções] LINK...",
+			},
+			{
+				Label: "Simular caminhos",
+				Run:   func(ctx context.Context) error { return iDownload(ctx, env, true) },
+				Desc: text("Lê os links e mostra o caminho que cada faixa teria, sem baixar nada. " +
+					"Bom para testar um template novo numa playlist de verdade."),
+				CLI: "spotdown --dry-run LINK...",
+			},
+		}},
+		{Title: "Opções", Items: []tui.Item{
+			{
+				Label: "Caminho dos arquivos",
+				Run:   func(context.Context) error { return iPath(env) },
+				Desc: func() string {
+					c := env.Cfg
+					return "Onde e com que nome cada faixa é salva, com as mesmas variáveis do spotdl.\n\n" +
+						tui.Capture(env.UI, func() {
 							env.UI.KV(
-								[2]string{"Nome", c.M3UName},
-								[2]string{"Caminhos", map[bool]string{true: "absolutos", false: "relativos ao .m3u8"}[c.M3UAbsolute]},
-								[2]string{"Exemplo", Tilde(previewM3U(env, c))},
+								[2]string{"Pasta base", Tilde(pathtpl.ExpandPath(c.OutputDir))},
+								[2]string{"Template", c.Output},
+								[2]string{"Caracteres", c.Restrict},
+								[2]string{"Exemplo", Tilde(previewPath(env, c))},
 							)
+						}) + "\n\n" + varsText()
+				},
+				CLI: `spotdown --output-dir DIR -o "{artist}/{album}/{track-number:02} - {title}" --restrict none|ascii|strict LINK`,
+			},
+			{
+				Label: "Formato e qualidade",
+				Run:   func(context.Context) error { return iFormat(env) },
+				Desc: func() string {
+					return fmt.Sprintf("Formato atual: %s, qualidade %s.\n\n", env.Cfg.Format, env.Cfg.Bitrate) +
+						"opus e m4a vêm direto do YouTube, sem reconverter (melhor qualidade por tamanho). " +
+						"mp3 é o mais compatível. flac não ganha qualidade: o áudio de origem já é com perdas."
+				},
+				CLI: "spotdown --format mp3|m4a|opus|flac|ogg --bitrate auto|320k LINK",
+			},
+			{
+				Label: "Playlists M3U",
+				Run:   func(context.Context) error { return iM3U(env) },
+				Desc: func() string {
+					c := env.Cfg
+					s := "Gera um .m3u8 para cada álbum e cada playlist baixados (faixas soltas não geram), " +
+						"na ordem original. Faixas que não baixaram entram como comentário.\n\n"
+					if !c.M3U {
+						return s + "Desligado."
+					}
+					return s + tui.Capture(env.UI, func() {
+						env.UI.KV(
+							[2]string{"Nome", c.M3UName},
+							[2]string{"Caminhos", map[bool]string{true: "absolutos", false: "relativos ao .m3u8"}[c.M3UAbsolute]},
+							[2]string{"Exemplo", Tilde(previewM3U(env, c))},
+						)
+					})
+				},
+				CLI: `spotdown --m3u --m3u-name "{list-name}.m3u8" [--m3u-absolute] LINK`,
+			},
+			{
+				Label: "Letras",
+				Run:   func(context.Context) error { return iLyrics(env) },
+				Desc: func() string {
+					return "Letras do LRCLIB (lrclib.net), sincronizadas quando houver.\n\nAtual: " + lyricsName(env.Cfg.Lyrics) + "."
+				},
+				CLI: "spotdown --lyrics embed|lrc|both|off LINK",
+			},
+			{
+				Label: "Arquivos existentes",
+				Run:   func(context.Context) error { return iOverwrite(env) },
+				Desc: func() string {
+					return "O que fazer quando o arquivo de destino já existe.\n\nAtual: " + overwriteName(env.Cfg.Overwrite) + "."
+				},
+				CLI: "spotdown --overwrite skip|metadata|force LINK",
+			},
+			{
+				Label: "Downloads simultâneos",
+				Run:   func(context.Context) error { return iThreads(env) },
+				Desc: func() string {
+					return fmt.Sprintf("Quantas faixas baixar ao mesmo tempo. Atual: %d.\n\n"+
+						"Mais que 4–6 raramente acelera e aumenta a chance de o YouTube limitar.", env.Cfg.Threads)
+				},
+				CLI: "spotdown --threads N LINK",
+			},
+			{
+				Label: "Fonte do Spotify",
+				Run:   func(ctx context.Context) error { return iAPI(ctx, env) },
+				Desc:  func() string { return apiDesc(env) },
+				CLI:   "spotdown --spotify-source web|official  ·  spotdown --login  ·  spotdown --logout",
+			},
+		}},
+		{Title: "Sistema", Items: append(setup, []tui.Item{
+			{
+				Label: "Dependências",
+				Run: func(ctx context.Context) error {
+					env.CheckTools(ctx)
+					depsReport(env)
+					return nil
+				},
+				Desc: func() string {
+					return "Confere o yt-dlp e o ffmpeg (enter checa de novo).\n\n" + tui.Capture(env.UI, func() { depsReport(env) })
+				},
+				CLI: "yt-dlp --version; ffmpeg -version",
+			},
+			{
+				Label: "Limpar cache",
+				Run:   func(context.Context) error { return iClearCache(env) },
+				Desc: func() string {
+					return "Os metadados de faixas e álbuns ficam em cache por 30 dias, para não consultar " +
+						"o Spotify de novo. Apagar é seguro: só deixa a próxima leitura mais lenta.\n\n" +
+						tui.Capture(env.UI, func() {
+							env.UI.KV([2]string{"Pasta", Tilde(config.CacheDir())}, [2]string{"Tamanho", cacheSize()})
 						})
-					},
-					CLI: `spotdown --m3u --m3u-name "{list-name}.m3u8" [--m3u-absolute] LINK`,
 				},
-				{
-					Label: "Letras",
-					Run:   func(context.Context) error { return iLyrics(env) },
-					Desc: func() string {
-						return "Letras do LRCLIB (lrclib.net), sincronizadas quando houver.\n\nAtual: " + lyricsName(env.Cfg.Lyrics) + "."
-					},
-					CLI: "spotdown --lyrics embed|lrc|both|off LINK",
+				CLI: "rm -r " + config.CacheDir(),
+			},
+			{
+				Label: "Arquivo de configuração",
+				Run: func(context.Context) error {
+					b, err := os.ReadFile(env.ConfigPath)
+					if err != nil {
+						return err
+					}
+					env.UI.Hint("%s", env.ConfigPath)
+					env.UI.Println()
+					env.UI.Println(strings.TrimRight(string(b), "\n"))
+					return nil
 				},
-				{
-					Label: "Arquivos existentes",
-					Run:   func(context.Context) error { return iOverwrite(env) },
-					Desc: func() string {
-						return "O que fazer quando o arquivo de destino já existe.\n\nAtual: " + overwriteName(env.Cfg.Overwrite) + "."
-					},
-					CLI: "spotdown --overwrite skip|metadata|force LINK",
-				},
-				{
-					Label: "Downloads simultâneos",
-					Run:   func(context.Context) error { return iThreads(env) },
-					Desc: func() string {
-						return fmt.Sprintf("Quantas faixas baixar ao mesmo tempo. Atual: %d.\n\n"+
-							"Mais que 4–6 raramente acelera e aumenta a chance de o YouTube limitar.", env.Cfg.Threads)
-					},
-					CLI: "spotdown --threads N LINK",
-				},
-				{
-					Label: "Fonte do Spotify",
-					Run:   func(ctx context.Context) error { return iAPI(ctx, env) },
-					Desc:  func() string { return apiDesc(env) },
-					CLI:   "spotdown --spotify-source web|official  ·  spotdown --login  ·  spotdown --logout",
-				},
-			}},
-			{Title: "Sistema", Items: []tui.Item{
-				{
-					Label: "Dependências",
-					Run: func(ctx context.Context) error {
-						env.CheckTools(ctx)
-						depsReport(env)
-						return nil
-					},
-					Desc: func() string {
-						return "Confere o yt-dlp e o ffmpeg (enter checa de novo).\n\n" + tui.Capture(env.UI, func() { depsReport(env) })
-					},
-					CLI: "yt-dlp --version; ffmpeg -version",
-				},
-				{
-					Label: "Limpar cache",
-					Run:   func(context.Context) error { return iClearCache(env) },
-					Desc: func() string {
-						return "Os metadados de faixas e álbuns ficam em cache por 30 dias, para não consultar " +
-							"o Spotify de novo. Apagar é seguro: só deixa a próxima leitura mais lenta.\n\n" +
-							tui.Capture(env.UI, func() {
-								env.UI.KV([2]string{"Pasta", Tilde(config.CacheDir())}, [2]string{"Tamanho", cacheSize()})
-							})
-					},
-					CLI: "rm -r " + config.CacheDir(),
-				},
-				{
-					Label: "Arquivo de configuração",
-					Run: func(context.Context) error {
-						b, err := os.ReadFile(env.ConfigPath)
-						if err != nil {
-							return err
-						}
-						env.UI.Hint("%s", env.ConfigPath)
-						env.UI.Println()
-						env.UI.Println(strings.TrimRight(string(b), "\n"))
-						return nil
-					},
-					Desc: text("As opções desta tela ficam em " + env.ConfigPath + " (enter mostra o conteúdo).\n\n" +
-						"Flags da linha de comando valem só para aquela execução; --save-config grava as flags como padrão."),
-					CLI: "spotdown --save-config [opções]",
-				},
-			}},
+				Desc: text("As opções desta tela ficam em " + env.ConfigPath + " (enter mostra o conteúdo).\n\n" +
+					"Flags da linha de comando valem só para aquela execução; --save-config grava as flags como padrão."),
+				CLI: "spotdown --save-config [opções]",
+			},
+		}...)},
+	}
+}
+
+func installItem(env *Env) tui.Item {
+	return tui.Item{
+		Label: "Instalar no PATH",
+		Run:   func(context.Context) error { return Install(env, false) },
+		Desc: func() string {
+			in, err := env.installer()
+			if err != nil {
+				return err.Error()
+			}
+			file, line := in.ShellRC(in.DefaultDir())
+			return "Copia este binário para " + Tilde(in.Target()) + " (sem sudo), para rodar `spotdown` de qualquer terminal.\n\n" +
+				tui.Capture(env.UI, func() {
+					env.UI.KV([2]string{"Este binário", Tilde(in.Self)}, [2]string{"Destino", Tilde(in.Target())})
+				}) +
+				"\n\nSe " + Tilde(in.DefaultDir()) + " não estiver no PATH, pergunta antes de acrescentar ao " + Tilde(file) + ":\n  " + line +
+				"\n\nDepois de instalado, este item some. Rodar de novo uma versão mais nova atualiza a instalação."
 		},
+		CLI: "./spotdown-linux-amd64 --install",
+	}
+}
+
+func updateItem(env *Env) tui.Item {
+	return tui.Item{
+		Label: "Procurar atualizações",
+		Run:   func(ctx context.Context) error { return CheckUpdate(ctx, env, false) },
+		Desc: func() string {
+			s := "Consulta a última release no GitHub, mostra o que mudou desde a sua versão e, se você confirmar, " +
+				"baixa o binário novo (conferido com o SHA-256 publicado) e troca o atual de uma vez.\n\n" +
+				tui.Capture(env.UI, func() { env.UI.KV([2]string{"Esta versão", env.Version}) })
+			if env.UpdateAvailable != "" {
+				s += "\n\n" + env.UI.Tone(ui.Good, "Disponível: "+env.UpdateAvailable)
+			}
+			return s + "\n\nAo abrir, o spotdown também confere sozinho, no máximo uma vez por dia, e avisa no topo da tela."
+		},
+		CLI: "spotdown --check-update  ·  spotdown --update",
 	}
 }
 

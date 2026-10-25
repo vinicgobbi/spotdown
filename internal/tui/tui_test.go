@@ -162,3 +162,32 @@ func TestPlainMenuAccessible(t *testing.T) {
 		t.Fatalf("saída:\n%s", out.String())
 	}
 }
+
+func TestRebuildAfterAction(t *testing.T) {
+	u := &ui.UI{Out: io.Discard, Interactive: true}
+	installed := false
+	items := func() []Section {
+		its := []Item{{Label: "Outra", Run: func(context.Context) error { return nil }}}
+		if !installed {
+			its = append(its, Item{Label: "Instalar", Run: func(context.Context) error { installed = true; return nil }})
+		}
+		return []Section{{Title: "Sistema", Items: its}}
+	}
+	app := App{Title: "t", Sections: items(), Rebuild: items}
+	ready := func(p *tea.Program) {
+		key := keySender(p)
+		p.Send(tea.WindowSizeMsg{Width: 100, Height: 30})
+		key(tea.KeyDown)
+		key(tea.KeyEnter) // Instalar
+		time.Sleep(50 * time.Millisecond)
+		key(tea.KeyEnter) // volta ao menu: o item some
+		key(tea.KeyRunes, 'q')
+	}
+	m, err := run(u, app, ready, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !installed || len(m.refs) != 1 || m.item().Label != "Outra" || strings.Contains(m.View(), "Instalar") {
+		t.Fatalf("installed=%v refs=%d item=%q\n%s", installed, len(m.refs), m.item().Label, m.View())
+	}
+}

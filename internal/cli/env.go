@@ -11,8 +11,10 @@ import (
 
 	"github.com/vinicgobbi/spotdown/internal/config"
 	"github.com/vinicgobbi/spotdown/internal/download"
+	"github.com/vinicgobbi/spotdown/internal/install"
 	"github.com/vinicgobbi/spotdown/internal/track"
 	"github.com/vinicgobbi/spotdown/internal/ui"
+	"github.com/vinicgobbi/spotdown/internal/update"
 )
 
 // Env é o estado compartilhado pelas ações.
@@ -27,6 +29,13 @@ type Env struct {
 	ToolsErr     error
 	ToolsWarn    string
 	ToolsVersion string
+
+	// Atualizações: cliente do GitHub e a versão nova encontrada ("" = nenhuma).
+	Updates         update.Client
+	UpdateAvailable string
+	UpdateStamp     string // registro da última verificação (padrão: no cache do usuário)
+	// NewInstaller troca o instalador nos testes (padrão: install.New).
+	NewInstaller func() (*install.Installer, error)
 
 	// sample é a primeira faixa do último download, usada nas prévias.
 	sample *track.Track

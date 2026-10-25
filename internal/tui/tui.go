@@ -44,6 +44,9 @@ type App struct {
 	// não mostra nada. Roda a cada redesenho, então deve ser barato.
 	Notice   func() string
 	Sections []Section
+	// Rebuild, se definido, remonta as seções quando uma ação termina (ex.:
+	// "Instalar no PATH" some depois de instalar).
+	Rebuild func() []Section
 }
 
 // Run mostra app até o usuário sair.
@@ -103,6 +106,9 @@ func plain(u *ui.UI, app App) error {
 		return nil
 	}
 	return u.Menu(header, "O que você quer fazer?", func() ([]ui.Entry, error) {
+		if app.Rebuild != nil {
+			app.Sections = app.Rebuild()
+		}
 		var es []ui.Entry
 		for _, s := range app.Sections {
 			for _, it := range s.Items {
@@ -176,14 +182,37 @@ type model struct {
 
 func newModel(u *ui.UI, app App) *model {
 	m := &model{u: u, app: app}
-	for si, s := range app.Sections {
+	m.index()
+	m.vp = viewport.New(0, 0)
+	m.loadDesc()
+	return m
+}
+
+// index refaz o mapa do índice plano para seção/item.
+func (m *model) index() {
+	m.refs = m.refs[:0]
+	for si, s := range m.app.Sections {
 		for ii := range s.Items {
 			m.refs = append(m.refs, [2]int{si, ii})
 		}
 	}
-	m.vp = viewport.New(0, 0)
-	m.loadDesc()
-	return m
+}
+
+// rebuild remonta as seções mantendo o cursor no mesmo item, se ele ainda existir.
+func (m *model) rebuild() {
+	if m.app.Rebuild == nil {
+		return
+	}
+	label := m.item().Label
+	m.app.Sections = m.app.Rebuild()
+	m.index()
+	m.cursor = min(m.cursor, len(m.refs)-1)
+	for i, r := range m.refs {
+		if m.app.Sections[r[0]].Items[r[1]].Label == label {
+			m.cursor = i
+			break
+		}
+	}
 }
 
 func (m *model) item() Item {
@@ -295,6 +324,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch k.String() {
 		case "enter", "esc", "left", "h", "q":
 			m.mode = browsing
+			m.rebuild()
 			m.loadDesc() // a ação pode ter mudado o que o item mostra
 		case "ctrl+c":
 			return m, tea.Quit
