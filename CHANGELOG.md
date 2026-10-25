@@ -1,3 +1,9 @@
+## v0.4.0 (2026-10-25)
+
+### Feat
+
+- **spotify**: web player como fonte padrão, API oficial opcional
+
 ## v0.3.0 (2026-10-25)
 
 ### Feat
