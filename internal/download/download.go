@@ -187,6 +187,15 @@ func CheckTools(ctx context.Context, o Options, now time.Time) (warning string, 
 	return "", nil
 }
 
+// Version devolve a versão do yt-dlp ("" se não rodar).
+func Version(ctx context.Context, o Options) string {
+	out, err := exec.CommandContext(ctx, o.bin(), "--version").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(out))
+}
+
 // ageDays calcula a idade de uma versão "AAAA.MM.DD[.x]".
 func ageDays(ver string, now time.Time) (int, bool) {
 	if len(ver) < 10 {

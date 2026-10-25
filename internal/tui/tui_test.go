@@ -1,198 +1,164 @@
 package tui
 
 import (
+	"bytes"
+	"context"
 	"errors"
-	"path/filepath"
+	"io"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/x/ansi"
 
-	"github.com/vinicgobbi/spotdown/internal/config"
-	"github.com/vinicgobbi/spotdown/internal/engine"
-	"github.com/vinicgobbi/spotdown/internal/spotify"
-	"github.com/vinicgobbi/spotdown/internal/track"
+	"github.com/vinicgobbi/spotdown/internal/ui"
 )
 
-func key(s string) tea.KeyMsg {
-	switch s {
-	case "enter":
-		return tea.KeyMsg{Type: tea.KeyEnter}
-	case "down":
-		return tea.KeyMsg{Type: tea.KeyDown}
-	case "up":
-		return tea.KeyMsg{Type: tea.KeyUp}
-	case "right":
-		return tea.KeyMsg{Type: tea.KeyRight}
-	case "esc":
-		return tea.KeyMsg{Type: tea.KeyEsc}
-	case "tab":
-		return tea.KeyMsg{Type: tea.KeyTab}
-	case "space":
-		return tea.KeyMsg{Type: tea.KeySpace, Runes: []rune{' '}}
-	case "ctrl+u":
-		return tea.KeyMsg{Type: tea.KeyCtrlU}
-	}
-	return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(s)}
+func opts() []tea.ProgramOption {
+	return []tea.ProgramOption{tea.WithInput(nil), tea.WithOutput(io.Discard), tea.WithoutSignalHandler()}
 }
 
-func send(t *testing.T, m Model, msgs ...tea.Msg) Model {
-	t.Helper()
-	for _, msg := range msgs {
-		nm, _ := m.Update(msg)
-		m = nm.(Model)
-	}
-	return m
-}
-
-func screen(m Model) string { return ansi.Strip(m.View()) }
-
-func testModel(t *testing.T) Model {
-	cfg := config.Default()
-	cfg.OutputDir = t.TempDir()
-	cfg.Output = "{artist}/{title}"
-	m := New(Config{Cfg: cfg, ConfigPath: filepath.Join(t.TempDir(), "config.toml"), Version: "test"})
-	m = send(t, m, tea.WindowSizeMsg{Width: 140, Height: 40})
-	return m
-}
-
-func album() *spotify.List {
-	l := &spotify.List{Kind: spotify.KindAlbum, Name: "Álbum X"}
-	for i, title := range []string{"Primeira", "Segunda", "Terceira"} {
-		l.Tracks = append(l.Tracks, track.Track{
-			ID: string(rune('a' + i)), Title: title, Artists: []string{"Banda"}, Album: "Álbum X",
-			TrackNumber: i + 1, TracksCount: 3, ListName: "Álbum X", ListPosition: i + 1, ListLength: 3,
-		})
-	}
-	return l
-}
-
-func TestInputValidatesLinks(t *testing.T) {
-	m := testModel(t)
-	m = send(t, m, key("enter"))
-	if !strings.Contains(screen(m), "cole ao menos um link") {
-		t.Errorf("sem erro de entrada vazia:\n%s", screen(m))
-	}
-	m = send(t, m, key("https://example.com/x"), key("enter"))
-	if m.state != stateInput || !strings.Contains(screen(m), "não é um link do Spotify") {
-		t.Errorf("aceitou link inválido:\n%s", screen(m))
+func keySender(p *tea.Program) func(tea.KeyType, ...rune) {
+	return func(k tea.KeyType, runes ...rune) {
+		p.Send(tea.KeyMsg{Type: k, Runes: runes})
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func TestOptionsPreviewAndReview(t *testing.T) {
-	m := testModel(t)
-	m = send(t, m, resolvedEvents(album())...)
-	if m.state != stateOptions {
-		t.Fatalf("estado %v", m.state)
+// TestFormInPanel dirige o programa bubbletea de verdade: esc cancela um
+// formulário, o formulário de uma ação é respondido no painel e a saída vai
+// para o painel, não para o terminal.
+func TestFormInPanel(t *testing.T) {
+	var out bytes.Buffer
+	u := &ui.UI{Out: &out, Interactive: true}
+	var name string
+	var cancelErr error
+	app := App{
+		Title: "teste",
+		Sections: []Section{{Title: "Ações", Items: []Item{
+			{Label: "Cancelar", Desc: func() string { return "descrição viva" }, Run: func(context.Context) error {
+				_, cancelErr = u.Confirm("Seguir?", "")
+				return cancelErr
+			}},
+			{Label: "Perguntar", Run: func(context.Context) error {
+				if err := u.Input("Nome", "", &name, nil); err != nil {
+					return err
+				}
+				u.OK("olá %s", name)
+				u.Status("quase")
+				return nil
+			}},
+		}}},
 	}
-	s := screen(m)
-	if !strings.Contains(s, filepath.Join("Banda", "Primeira.mp3")) {
-		t.Errorf("prévia sem o caminho da primeira faixa:\n%s", s)
+	ready := func(p *tea.Program) {
+		key := keySender(p)
+		p.Send(tea.WindowSizeMsg{Width: 100, Height: 30})
+		key(tea.KeyEnter) // Cancelar: o confirm abre no painel
+		key(tea.KeyEsc)   // e é cancelado
+		key(tea.KeyEnter) // volta ao menu
+		key(tea.KeyDown)
+		key(tea.KeyEnter) // Perguntar
+		key(tea.KeyRunes, []rune("Ana")...)
+		key(tea.KeyEnter) // envia
+		key(tea.KeyEnter) // volta ao menu
+		key(tea.KeyRunes, 'q')
 	}
-
-	// Template (campo 1): troca por outro e vê a prévia mudar.
-	m = send(t, m, key("down"), key("ctrl+u"), key("{album}/{track-number:02} {title}"))
-	if s := screen(m); !strings.Contains(s, filepath.Join("Álbum X", "01 Primeira.mp3")) {
-		t.Errorf("prévia não acompanhou o template:\n%s", s)
-	}
-	// Formato (campo 2): → muda de mp3 para m4a.
-	m = send(t, m, key("down"), key("right"))
-	if m.c.Format != "m4a" || !strings.Contains(screen(m), "01 Primeira.m4a") {
-		t.Errorf("formato=%s\n%s", m.c.Format, screen(m))
-	}
-	// Variável inválida bloqueia o avanço.
-	m = send(t, m, key("up"), key("{xyz}"), key("enter"))
-	if m.state != stateOptions || !strings.Contains(screen(m), "variável desconhecida {xyz}") {
-		t.Errorf("aceitou template inválido:\n%s", screen(m))
-	}
-	m = send(t, m, key("ctrl+u"), key("{album}/{title}"), key("enter"))
-	if m.state != stateReview {
-		t.Fatalf("estado %v: %s", m.state, m.optErr)
-	}
-	if s := screen(m); !strings.Contains(s, "3 de 3") || !strings.Contains(s, filepath.Join("Álbum X", "Segunda.m4a")) {
-		t.Errorf("revisão:\n%s", s)
-	}
-	m = send(t, m, key("space"))
-	if m.countSelected() != 2 || !strings.Contains(screen(m), "2 de 3") {
-		t.Errorf("espaço não desmarcou:\n%s", screen(m))
-	}
-	m = send(t, m, key("a"))
-	if m.countSelected() != 3 {
-		t.Errorf("a não marcou todas: %d", m.countSelected())
-	}
-}
-
-func TestOptionsSaveConfig(t *testing.T) {
-	m := testModel(t)
-	m = send(t, m, resolvedEvents(album())...)
-	m = send(t, m, key("down"), key("down"), key("right"), tea.KeyMsg{Type: tea.KeyCtrlS})
-	if !strings.Contains(screen(m), "configuração gravada") {
-		t.Fatalf("não gravou:\n%s", screen(m))
-	}
-	got, _, err := config.Load(m.cfg.ConfigPath)
-	if err != nil || got.Format != "m4a" {
-		t.Errorf("format=%q err=%v", got.Format, err)
-	}
-}
-
-func TestRunningAndDoneScreens(t *testing.T) {
-	m := testModel(t)
-	l := album()
-	m.lists = []*spotify.List{l}
-	if err := m.plan(); err != nil {
+	m, err := run(u, app, ready, opts())
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Simula a execução sem rede: estado de downloads com eventos falsos.
-	m.runJobs = m.jobs
-	m.results = make([]engine.Result, len(m.jobs))
-	m.stage, m.frac = map[int]string{}, map[int]float64{}
-	m.state = stateRunning
-	m.events = make(chan any)
-	m = send(t, m, eventsMsg{
-		engine.JobStartEvent{Index: 0}, engine.JobStageEvent{Index: 0, Stage: "baixando"}, engine.JobProgressEvent{Index: 0, Frac: 0.5},
-		engine.JobStartEvent{Index: 1}, engine.JobDoneEvent{Index: 1, Result: engine.Result{Job: m.jobs[1], Status: engine.NoMatch, Err: errors.New("x")}},
-	})
-	s := screen(m)
-	if !strings.Contains(s, "baixando  50%") || !strings.Contains(s, "Banda - Primeira") || !strings.Contains(s, "sem correspondência") {
-		t.Errorf("tela de downloads:\n%s", s)
+	if !errors.Is(cancelErr, ui.ErrAborted) {
+		t.Fatalf("esc: err = %v", cancelErr)
 	}
-	m = send(t, m, key("q"))
-	if !m.cancelAsk || !strings.Contains(screen(m), "Cancelar os downloads?") {
-		t.Errorf("sem confirmação de cancelamento")
+	if name != "Ana" {
+		t.Fatalf("name = %q", name)
 	}
-	m = send(t, m, key("esc"))
-
-	res := []engine.Result{
-		{Job: m.jobs[0], Status: engine.Downloaded},
-		{Job: m.jobs[1], Status: engine.NoMatch, Err: errors.New("x")},
-		{Job: m.jobs[2], Status: engine.Skipped},
+	if log := m.log.String(); !strings.Contains(log, "olá Ana") {
+		t.Fatalf("painel:\n%s", log)
 	}
-	m = send(t, m, eventsMsg{engine.FinishedEvent{Results: res, M3U: []string{"/tmp/x.m3u8"}}})
-	s = screen(m)
-	if m.state != stateDone || !strings.Contains(s, "1 baixada(s), 1 já existia(m)") || !strings.Contains(s, "M3U: /tmp/x.m3u8") || !strings.Contains(s, "Não baixadas") {
-		t.Errorf("tela final:\n%s", s)
+	if m.status != "" {
+		t.Fatalf("status não foi limpo ao terminar: %q", m.status)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("saída vazou para o terminal: %q", out.String())
+	}
+	if u.Out != &out || u.Host != nil {
+		t.Fatal("saídas não restauradas")
+	}
+	if v := m.View(); !strings.Contains(v, "AÇÕES") || !strings.Contains(v, "Perguntar") {
+		t.Fatalf("view:\n%s", v)
 	}
 }
 
-// resolvedEvents simula o fim da leitura dos links.
-func resolvedEvents(lists ...*spotify.List) []tea.Msg {
-	return []tea.Msg{eventsMsg{resolvedMsg{lists: lists}}}
+// TestCancelRunning: ctrl+c uma vez só pede confirmação; a segunda cancela
+// o contexto da ação, que termina com "Cancelado.".
+func TestCancelRunning(t *testing.T) {
+	u := &ui.UI{Out: io.Discard, Interactive: true}
+	started := make(chan struct{})
+	var ctxErr error
+	app := App{Title: "teste", Sections: []Section{{Title: "Ações", Items: []Item{
+		{Label: "Demorar", Run: func(ctx context.Context) error {
+			u.Status("trabalhando")
+			close(started)
+			<-ctx.Done()
+			ctxErr = ctx.Err()
+			return ctx.Err()
+		}},
+	}}}}
+	var afterFirst, afterCancel string
+	ready := func(p *tea.Program) {
+		key := keySender(p)
+		p.Send(tea.WindowSizeMsg{Width: 100, Height: 30})
+		key(tea.KeyEnter)
+		<-started
+		time.Sleep(50 * time.Millisecond)
+		key(tea.KeyCtrlC)
+		afterFirst = "ok"
+		key(tea.KeyCtrlC)
+		time.Sleep(100 * time.Millisecond)
+		afterCancel = "ok"
+		key(tea.KeyEnter)
+		key(tea.KeyRunes, 'q')
+	}
+	m, err := run(u, app, ready, opts())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFirst == "" || afterCancel == "" || !errors.Is(ctxErr, context.Canceled) {
+		t.Fatalf("ctx = %v", ctxErr)
+	}
+	if !errors.Is(m.result, context.Canceled) {
+		t.Fatalf("result = %v", m.result)
+	}
 }
 
-func TestVarsHelpAligned(t *testing.T) {
-	lines := strings.Split(ansi.Strip(varsHelp()), "\n")
-	col := -1
-	for _, l := range lines[:5] {
-		i := strings.Index(l[1:], "{")
-		if i < 0 {
-			continue
-		}
-		w := ansi.StringWidth(l[:i+1])
-		if col >= 0 && w != col {
-			t.Errorf("colunas desalinhadas:\n%s", strings.Join(lines, "\n"))
-			return
-		}
-		col = w
+func TestStatusShownWhileRunning(t *testing.T) {
+	u := &ui.UI{Out: io.Discard, Interactive: true}
+	m := newModel(u, App{Title: "t", Sections: []Section{{Title: "A", Items: []Item{{Label: "x"}}}}})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.mode = running
+	m.Update(outMsg("linha 1\n"))
+	m.Update(statusMsg("Baixando 3/10"))
+	if v := m.View(); !strings.Contains(v, "linha 1") || !strings.Contains(v, "Baixando 3/10") || !strings.Contains(v, "ctrl+c cancelar") {
+		t.Fatalf("view:\n%s", v)
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyCtrlC})
+	if !strings.Contains(m.View(), "ctrl+c de novo cancela") {
+		t.Fatal("sem pedido de confirmação")
+	}
+}
+
+func TestPlainMenuAccessible(t *testing.T) {
+	var out bytes.Buffer
+	ran := false
+	u := &ui.UI{In: strings.NewReader("1\n2\n"), Out: &out, Interactive: true, Accessible: true}
+	app := App{Title: "spotdown", Sections: []Section{{Title: "A", Items: []Item{
+		{Label: "Fazer", Run: func(context.Context) error { ran = true; u.OK("feito"); return nil }},
+	}}}}
+	if err := Run(u, app); err != nil {
+		t.Fatal(err)
+	}
+	if !ran || !strings.Contains(out.String(), "feito") {
+		t.Fatalf("saída:\n%s", out.String())
 	}
 }

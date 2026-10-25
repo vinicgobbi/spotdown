@@ -22,10 +22,8 @@ Spotify (páginas públicas)  →  YouTube Music (busca)  →  yt-dlp + ffmpeg  
 ## Uso
 
 ```sh
-spotdown                       # abre a TUI para colar os links
-spotdown LINK...               # já lê os links e vai para as opções
-spotdown -y LINK...            # baixa direto, sem revisar
-spotdown --no-tui LINK...      # texto simples (scripts/cron; padrão sem terminal)
+spotdown                       # abre a interface interativa
+spotdown LINK...               # baixa direto, em texto (bom para scripts e cron)
 spotdown --dry-run LINK...     # só lista os caminhos que seriam gerados
 ```
 
@@ -37,11 +35,17 @@ spotdown --m3u --m3u-name "Playlists/{list-name}.m3u8" -o "{list-name}/{list-pos
 spotdown --overwrite metadata LINK   # só regrava as tags dos arquivos que já existem
 ```
 
-Na TUI o fluxo é: **Links → Leitura → Opções → Revisão → Download → Fim**.
+### Interface interativa
 
-- **Opções**: mostra uma prévia do caminho final usando a primeira faixa lida, que muda enquanto você digita. `tab` lista as variáveis, e `ctrl+s` grava as opções como padrão.
-- **Revisão**: lista cada faixa com o caminho de destino. `espaço` marca ou desmarca, e as que já existem aparecem com `●`.
-- **Download**: `ctrl+c` pede confirmação e cancela sem deixar arquivos pela metade nem temporários.
+A interface segue o estilo do deploy-tools: as ações ficam numa barra lateral e o painel ao lado descreve a selecionada, com o comando equivalente em "Pelo terminal:". Ao abrir uma ação, o painel passa a executá-la, com as perguntas e a saída ali dentro.
+
+- **Baixar**
+  - **Baixar links**: cole um ou mais links. Depois da leitura, escolha baixar todas as faixas, escolher quais (lista com filtro; `●` marca as que já existem) ou cancelar. Durante o download, uma linha de status mostra as faixas em andamento.
+  - **Simular caminhos**: mostra os caminhos que seriam gerados, sem baixar nada.
+- **Opções**: caminho dos arquivos (com prévia ao vivo do template), formato e qualidade, playlists M3U, letras, arquivos existentes, downloads simultâneos e API do Spotify. Cada uma grava direto no arquivo de configuração.
+- **Sistema**: dependências (versões do yt-dlp e do ffmpeg), limpar cache e arquivo de configuração.
+
+Teclas: `↑↓` navega, `enter` abre e `q` sai. Durante uma ação, `ctrl+c` duas vezes cancela sem deixar arquivos pela metade nem temporários. Com `ACCESSIBLE=1`, os mesmos itens viram um menu por linhas, para leitores de tela.
 
 ## Template de caminho
 
@@ -98,7 +102,7 @@ spotify_client_id = "..."
 spotify_client_secret = "..."
 ```
 
-Também dá para usar as variáveis `SPOTIFY_CLIENT_ID` e `SPOTIFY_CLIENT_SECRET`, que não são gravadas no arquivo.
+Isso também pode ser feito na interface, em **Opções › API do Spotify**, que testa as credenciais antes de gravar. Também dá para usar as variáveis `SPOTIFY_CLIENT_ID` e `SPOTIFY_CLIENT_SECRET`, que não são gravadas no arquivo.
 
 Esse é o fluxo *client credentials* da API oficial, sem login de usuário. Para economizar requisições, a consulta extra a cada álbum (que traz gravadora, gênero e quantidade de discos) só é feita quando o template usa `{publisher}`, `{disc-count}` ou `{genre}`.
 
@@ -125,7 +129,8 @@ go build -o spotdown ./cmd/spotdown
 | `internal/pathtpl` | template e sanitização |
 | `internal/m3u` | playlists |
 | `internal/engine` | pipeline concorrente e eventos |
-| `internal/tui` | interface bubbletea |
-| `internal/plain` | saída em texto |
+| `internal/ui` | prompts (huh) e saída formatada, iguais aos do deploy-tools |
+| `internal/tui` | barra lateral + painel (bubbletea) |
+| `internal/cli` | ações: download, opções e sistema |
 
 Os commits seguem Conventional Commits. A cada push na `main`, o workflow de release gera a versão com commitizen e publica os binários estáticos.

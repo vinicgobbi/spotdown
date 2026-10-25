@@ -1,351 +1,561 @@
-// Package tui é a interface interativa: colar links, ler os metadados,
-// ajustar as opções com prévia do caminho, revisar as faixas e acompanhar os
-// downloads.
+// Package tui é a interface em tela cheia do spotdown, no estilo do
+// deploy-tools: as ações numa barra lateral e um painel que descreve a
+// selecionada e depois a executa. Cada ação roda na própria goroutine, a
+// saída vai para o painel e os formulários huh aparecem nele (ver ui.Host).
+//
+// No modo acessível (ACCESSIBLE=1, e nos testes) os mesmos itens viram um
+// menu por linhas.
 package tui
 
 import (
+	"bytes"
 	"context"
-	"time"
+	"fmt"
+	"regexp"
+	"strings"
 
-	"github.com/charmbracelet/bubbles/progress"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textarea"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 
-	"github.com/vinicgobbi/spotdown/internal/config"
-	"github.com/vinicgobbi/spotdown/internal/engine"
-	"github.com/vinicgobbi/spotdown/internal/spotify"
+	"github.com/vinicgobbi/spotdown/internal/ui"
 )
 
-// Config é o que o main passa para a interface.
-type Config struct {
-	Cfg        config.Config
-	ConfigPath string
-	URLs       []string // links da linha de comando (pula a tela de entrada)
-	Yes        bool     // com URLs: baixar direto, sem opções/revisão
-	Warnings   []string
-	Version    string
+type Item struct {
+	Label string
+	// Desc é o texto do painel enquanto o item está selecionado. É calculado
+	// quando a seleção muda, então pode mostrar contexto atual.
+	Desc func() string
+	CLI  string // o comando equivalente, mostrado abaixo da descrição
+	// Run executa a ação; ctx é cancelado com ctrl+c duas vezes.
+	Run func(ctx context.Context) error
 }
 
-type state int
+type Section struct {
+	Title string
+	Items []Item
+}
+
+type App struct {
+	Title    string
+	Subtitle func() string // contexto ao lado do título
+	// Notice é uma linha abaixo do cabeçalho (ex.: o yt-dlp está velho); ""
+	// não mostra nada. Roda a cada redesenho, então deve ser barato.
+	Notice   func() string
+	Sections []Section
+}
+
+// Run mostra app até o usuário sair.
+func Run(u *ui.UI, app App) error {
+	if u.Accessible || !u.Interactive {
+		return plain(u, app)
+	}
+	_, err := run(u, app, nil, []tea.ProgramOption{tea.WithAltScreen()})
+	return err
+}
+
+// run é a parte em tela cheia de Run; ready (testes) recebe o programa para
+// mandar teclas depois de montado.
+func run(u *ui.UI, app App, ready func(*tea.Program), opts []tea.ProgramOption) (*model, error) {
+	m := newModel(u, app)
+	p := tea.NewProgram(m, opts...)
+	m.p = p
+
+	oldOut := u.Out
+	u.Out, u.Host = panelWriter{p}, (*host)(m)
+	defer func() { u.Out, u.Host = oldOut, nil }()
+	if ready != nil {
+		go ready(p)
+	}
+	_, err := p.Run()
+	if m.cancel != nil {
+		m.cancel() // saiu com uma ação rodando (ctrl+c depois do fim): para ela
+	}
+	return m, err
+}
+
+// Capture roda f com u.Out indo para um buffer, para descrições montadas com
+// as mesmas funções que imprimem a saída dos comandos.
+func Capture(u *ui.UI, f func()) string {
+	var b bytes.Buffer
+	old := u.Out
+	u.Out = &b
+	defer func() { u.Out = old }()
+	f()
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// plain é a alternativa por linhas: os mesmos itens num ui.Menu.
+func plain(u *ui.UI, app App) error {
+	header := func() error {
+		sub := ""
+		if app.Subtitle != nil {
+			sub = app.Subtitle()
+		}
+		u.Header(app.Title, sub)
+		if app.Notice != nil {
+			if n := app.Notice(); n != "" {
+				u.Hint("→ %s", n)
+				u.Println()
+			}
+		}
+		return nil
+	}
+	return u.Menu(header, "O que você quer fazer?", func() ([]ui.Entry, error) {
+		var es []ui.Entry
+		for _, s := range app.Sections {
+			for _, it := range s.Items {
+				es = append(es, ui.Entry{Label: it.Label, Run: func() error { return it.Run(context.Background()) }})
+			}
+		}
+		return append(es, ui.Entry{Label: "Sair"}), nil
+	})
+}
+
+// ---- modelo bubbletea ----
+
+type mode int
 
 const (
-	stateInput state = iota
-	stateResolving
-	stateOptions
-	stateReview
-	stateRunning
-	stateDone
+	browsing mode = iota
+	running
+	done
 )
 
-// Model é o modelo bubbletea.
-type Model struct {
-	cfg   Config
-	c     config.Config // opções atuais (editáveis na tela de opções)
-	state state
-	w, h  int
+type (
+	outMsg    string
+	statusMsg string
+	doneMsg   struct{ err error }
+	formMsg   struct {
+		form *huh.Form
+		done chan error
+	}
+)
 
-	spin spinner.Model
-	bar  progress.Model
+type panelWriter struct{ p *tea.Program }
 
-	// entrada
-	area     textarea.Model
-	inputErr string
+func (w panelWriter) Write(b []byte) (int, error) {
+	w.p.Send(outMsg(string(b)))
+	return len(b), nil
+}
 
-	// leitura dos links
-	sp          *spotify.Client
-	spAlbumInfo bool // AlbumDetails com que o cliente foi criado
-	urls        []string
-	resolved    []resolveLine
-	resProgress [2]int
-	lists       []*spotify.List
+type host model
 
-	events chan any
-	cancel context.CancelFunc
+// RunForm é chamado da goroutine da ação e bloqueia até o usuário responder
+// (ou cancelar) o formulário no painel.
+func (h *host) RunForm(f *huh.Form) error {
+	done := make(chan error, 1)
+	h.p.Send(formMsg{f, done})
+	return <-done
+}
 
-	// opções
-	fields   []field
-	fcur     int
-	showVars bool
-	optMsg   string
-	optErr   string
+func (h *host) SetStatus(s string) { h.p.Send(statusMsg(s)) }
 
-	// revisão
-	jobs   []engine.Job
-	sel    []bool
-	exists []bool
-	rcur   int
-	revErr string
+type model struct {
+	u    *ui.UI
+	app  App
+	p    *tea.Program
+	refs [][2]int // índice plano -> seção, item
 
-	// downloads
-	runJobs   []engine.Job
-	results   []engine.Result
-	stage     map[int]string
-	frac      map[int]float64
-	active    []int
-	log       []string
-	notices   []string
-	started   time.Time
-	elapsed   time.Duration
+	cursor int
+	mode   mode
+	desc   string
+
+	log       strings.Builder
+	status    string
+	result    error
+	form      *huh.Form
+	formDone  chan error
+	vp        viewport.Model
+	cancel    context.CancelFunc
 	cancelAsk bool
-	canceling bool
-	finished  *engine.FinishedEvent
+
+	w, h int
 }
 
-type resolveLine struct {
-	url  string
-	done bool
-	list *spotify.List
-	err  error
-}
-
-// New cria o modelo.
-func New(cfg Config) Model {
-	sp := spinner.New()
-	sp.Spinner = spinner.Dot
-	sp.Style = accentStyle
-	m := Model{
-		cfg:  cfg,
-		c:    cfg.Cfg,
-		spin: sp,
-		bar:  progress.New(progress.WithDefaultGradient(), progress.WithoutPercentage()),
-		area: newArea(),
+func newModel(u *ui.UI, app App) *model {
+	m := &model{u: u, app: app}
+	for si, s := range app.Sections {
+		for ii := range s.Items {
+			m.refs = append(m.refs, [2]int{si, ii})
+		}
 	}
-	m.fields = newFields(m.c)
-	if len(cfg.URLs) > 0 {
-		m.urls = cfg.URLs
-		m.state = stateResolving
-	}
+	m.vp = viewport.New(0, 0)
+	m.loadDesc()
 	return m
 }
 
-// Result devolve o fim da execução (nil se o usuário saiu antes).
-func (m Model) Result() *engine.FinishedEvent { return m.finished }
-
-func (m Model) Init() tea.Cmd {
-	if m.state == stateResolving {
-		return tea.Batch(m.spin.Tick, func() tea.Msg { return startResolveMsg{} })
-	}
-	return tea.Batch(textarea.Blink, m.spin.Tick)
+func (m *model) item() Item {
+	r := m.refs[m.cursor]
+	return m.app.Sections[r[0]].Items[r[1]]
 }
 
-type (
-	eventsMsg       []any
-	tickMsg         time.Time
-	startResolveMsg struct{}
-	// resolvedMsg vai pelo canal de eventos depois do último link.
-	resolvedMsg struct{ lists []*spotify.List }
-)
-
-func tick() tea.Cmd {
-	return tea.Tick(time.Second, func(t time.Time) tea.Msg { return tickMsg(t) })
-}
-
-// listen espera o próximo evento e já drena os que estiverem na fila, para
-// não redesenhar a tela a cada ponto de progresso.
-func listen(ch chan any) tea.Cmd {
-	return func() tea.Msg {
-		ev, ok := <-ch
-		if !ok {
-			return nil
-		}
-		batch := []any{ev}
-		for len(batch) < 500 {
-			select {
-			case ev, ok := <-ch:
-				if !ok {
-					return eventsMsg(batch)
-				}
-				batch = append(batch, ev)
-			default:
-				return eventsMsg(batch)
-			}
-		}
-		return eventsMsg(batch)
+func (m *model) loadDesc() {
+	it := m.item()
+	m.desc = ""
+	if it.Desc != nil {
+		m.desc = it.Desc()
 	}
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *model) Init() tea.Cmd { return nil }
+
+func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		// Descontando o padding aplicado em View.
-		m.w, m.h = msg.Width-4, msg.Height-1
-		m.resize()
+		m.w, m.h = msg.Width, msg.Height
+		m.layout()
+		if m.form != nil {
+			m.form = m.form.WithWidth(m.panelW())
+			fm, cmd := m.form.Update(msg)
+			m.form = fm.(*huh.Form)
+			m.refresh()
+			return m, cmd
+		}
+		m.refresh()
 		return m, nil
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spin, cmd = m.spin.Update(msg)
+	case outMsg:
+		m.log.WriteString(string(msg))
+		m.refresh()
+		return m, nil
+	case statusMsg:
+		m.status = string(msg)
+		m.refresh()
+		return m, nil
+	case formMsg:
+		m.form, m.formDone = msg.form.WithWidth(m.panelW()), msg.done
+		cmd := m.form.Init()
+		m.refresh()
 		return m, cmd
-
-	case tickMsg:
-		if m.state == stateRunning {
-			m.elapsed = time.Since(m.started)
-			return m, tick()
-		}
+	case doneMsg:
+		m.mode, m.result, m.status, m.cancelAsk = done, msg.err, "", false
+		m.cancel()
+		m.cancel = nil
+		m.refresh()
 		return m, nil
-
-	case startResolveMsg:
-		return m.startResolve()
-
-	case eventsMsg:
-		return m.handleEvents(msg)
-
-	case tea.KeyMsg:
-		switch m.state {
-		case stateInput:
-			return m.updateInput(msg)
-		case stateResolving:
-			return m.updateResolving(msg)
-		case stateOptions:
-			return m.updateOptions(msg)
-		case stateReview:
-			return m.updateReview(msg)
-		case stateRunning:
-			return m.updateRunning(msg)
-		case stateDone:
-			return m.updateDone(msg)
-		}
 	}
 
-	if m.state == stateInput {
-		var cmd tea.Cmd
-		m.area, cmd = m.area.Update(msg)
+	if m.form != nil {
+		if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
+			m.finishForm(ui.ErrAborted)
+			return m, nil
+		}
+		fm, cmd := m.form.Update(msg)
+		m.form = fm.(*huh.Form)
+		switch m.form.State {
+		case huh.StateCompleted:
+			m.finishForm(nil)
+		case huh.StateAborted:
+			m.finishForm(ui.ErrAborted)
+		default:
+			m.refresh()
+		}
 		return m, cmd
+	}
+
+	k, ok := msg.(tea.KeyMsg)
+	if !ok {
+		return m, nil
+	}
+	switch m.mode {
+	case browsing:
+		switch k.String() {
+		case "q", "ctrl+c":
+			return m, tea.Quit
+		case "up", "k":
+			m.move(-1)
+		case "down", "j":
+			m.move(1)
+		case "home", "g":
+			m.move(-len(m.refs))
+		case "end", "G":
+			m.move(len(m.refs))
+		case "enter", "right", "l":
+			m.start()
+		}
+	case running:
+		// Sair no meio deixaria downloads pela metade: ctrl+c pede
+		// confirmação e cancela a ação, que termina limpando o que fez.
+		switch k.String() {
+		case "ctrl+c":
+			if m.cancelAsk {
+				m.cancel()
+				m.status = "cancelando…"
+			}
+			m.cancelAsk = !m.cancelAsk
+		case "esc":
+			m.cancelAsk = false
+		default:
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
+		}
+	case done:
+		switch k.String() {
+		case "enter", "esc", "left", "h", "q":
+			m.mode = browsing
+			m.loadDesc() // a ação pode ter mudado o que o item mostra
+		case "ctrl+c":
+			return m, tea.Quit
+		default:
+			var cmd tea.Cmd
+			m.vp, cmd = m.vp.Update(msg)
+			return m, cmd
+		}
 	}
 	return m, nil
 }
 
-func (m *Model) resize() {
-	m.bar.Width = max(20, min(m.w-30, 60))
-	m.area.SetWidth(max(20, m.w-2))
-	m.area.SetHeight(max(3, min(12, m.h-12)))
-	for i := range m.fields {
-		m.fields[i].input.Width = max(20, m.w-28)
-	}
+func (m *model) move(d int) {
+	m.cursor = max(0, min(len(m.refs)-1, m.cursor+d))
+	m.loadDesc()
 }
 
-func (m Model) handleEvents(batch eventsMsg) (tea.Model, tea.Cmd) {
-	var cmds []tea.Cmd
-	for _, ev := range batch {
-		switch ev := ev.(type) {
-		case engine.ResolveProgressEvent:
-			m.resProgress = [2]int{ev.Done, ev.Total}
-		case engine.ResolveDoneEvent:
-			for i := range m.resolved {
-				if m.resolved[i].url == ev.URL && !m.resolved[i].done {
-					m.resolved[i] = resolveLine{url: ev.URL, done: true, list: ev.List, err: ev.Err}
-					break
-				}
+func (m *model) start() {
+	it := m.item()
+	m.mode, m.result, m.status = running, nil, ""
+	m.log.Reset()
+	ctx, cancel := context.WithCancel(context.Background())
+	m.cancel = cancel
+	m.refresh()
+	go func() {
+		m.p.Send(doneMsg{safeRun(ctx, it.Run)})
+	}()
+}
+
+func safeRun(ctx context.Context, f func(context.Context) error) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("erro interno: %v", r)
+		}
+	}()
+	return f(ctx)
+}
+
+func (m *model) finishForm(err error) {
+	m.formDone <- err
+	m.form, m.formDone = nil, nil
+	m.refresh()
+}
+
+// ---- layout ----
+
+var (
+	accent    = lipgloss.Color("12")
+	titleSt   = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	faintSt   = lipgloss.NewStyle().Faint(true)
+	selSt     = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	okSt      = lipgloss.NewStyle().Foreground(lipgloss.Color("10"))
+	noticeSt  = lipgloss.NewStyle().Foreground(lipgloss.Color("14"))
+	warnSt    = lipgloss.NewStyle().Foreground(lipgloss.Color("11"))
+	boxSt     = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("8")).Padding(0, 1)
+	activeBox = boxSt.BorderForeground(accent)
+)
+
+func (m *model) sideW() int {
+	w := 18
+	for _, s := range m.app.Sections {
+		for _, it := range s.Items {
+			w = max(w, lipgloss.Width(it.Label)+4)
+		}
+	}
+	return w
+}
+
+// panelW é a largura do texto dentro da caixa do painel.
+func (m *model) panelW() int { return max(20, m.w-m.sideW()-4-4) }
+
+// bodyH é a altura dentro das caixas (cabeçalho e rodapé ocupam uma linha cada).
+func (m *model) bodyH() int {
+	h := m.h - 2 - 2
+	if m.notice() != "" {
+		h--
+	}
+	return max(5, h)
+}
+
+func (m *model) layout() {
+	m.vp.Width = m.panelW()
+	m.vp.Height = m.bodyH() - 2 // título do painel + linha em branco
+}
+
+// refresh remonta o conteúdo do painel de uma ação em andamento/concluída.
+func (m *model) refresh() {
+	if m.mode == browsing {
+		return
+	}
+	var parts []string
+	if out := strings.TrimRight(m.log.String(), "\n"); out != "" {
+		parts = append(parts, wrap(out, m.panelW()))
+	}
+	if m.status != "" && m.form == nil {
+		parts = append(parts, noticeSt.Render(wrap(m.status, m.panelW())))
+	}
+	if m.form != nil {
+		parts = append(parts, m.form.View())
+	}
+	if m.mode == done {
+		switch {
+		case m.result == nil && len(parts) > 0:
+			parts = append(parts, faintSt.Render("Concluído."))
+		case m.result == nil:
+			parts = append(parts, okSt.Render("✓ Concluído."))
+		case m.result == ui.ErrAborted || m.result == context.Canceled:
+			parts = append(parts, warnSt.Render("Cancelado."))
+		default:
+			parts = append(parts, wrap(ui.ErrorText(m.result.Error()), m.panelW()))
+		}
+	}
+	m.vp.SetContent(strings.Join(parts, "\n\n"))
+	m.vp.GotoBottom()
+}
+
+// listPrefix casa o recuo de uma linha mais um marcador de lista ("  1. ",
+// "  · ", "✓ ", "[3/10] ✓ "), para as linhas quebradas manterem o recuo.
+var listPrefix = regexp.MustCompile(`^ *(\d+\. |\[\d+/\d+\] [·✓!✗?↻\-] |[·•\-✓!✗?↻] )?`)
+
+func wrap(s string, w int) string {
+	lines := strings.Split(s, "\n")
+	for i, l := range lines {
+		if lipgloss.Width(l) <= w {
+			continue
+		}
+		prefix := listPrefix.FindString(l)
+		if len(prefix) > w/2 {
+			prefix = ""
+		}
+		pad := strings.Repeat(" ", lipgloss.Width(prefix))
+		body := lipgloss.NewStyle().Width(w - len(pad)).Render(l[len(prefix):])
+		parts := strings.Split(body, "\n")
+		for j := range parts {
+			parts[j] = strings.TrimRight(parts[j], " ")
+			if j == 0 {
+				parts[j] = prefix + parts[j]
+			} else {
+				parts[j] = pad + parts[j]
 			}
-			m.resProgress = [2]int{}
-		case resolvedMsg:
-			return m.afterResolve(ev.lists)
-		case engine.JobStartEvent:
-			m.results[ev.Index].Status = engine.Running
-			m.active = append(m.active, ev.Index)
-		case engine.JobStageEvent:
-			m.stage[ev.Index] = ev.Stage
-		case engine.JobProgressEvent:
-			m.frac[ev.Index] = ev.Frac
-		case engine.JobDoneEvent:
-			m.results[ev.Index] = ev.Result
-			m.removeActive(ev.Index)
-			m.log = append(m.log, renderResult(ev.Result))
-			if len(m.log) > 500 {
-				m.log = m.log[len(m.log)-500:]
-			}
-		case engine.WarningEvent:
-			m.notices = append(m.notices, ev.Msg)
-		case engine.FinishedEvent:
-			m.finished = &ev
-			m.elapsed = ev.Elapsed
-			m.state = stateDone
 		}
+		lines[i] = strings.Join(parts, "\n")
 	}
-	if m.state == stateRunning || m.state == stateResolving {
-		cmds = append(cmds, listen(m.events))
-	}
-	return m, tea.Batch(cmds...)
+	return strings.Join(lines, "\n")
 }
 
-func (m *Model) removeActive(i int) {
-	for k, v := range m.active {
-		if v == i {
-			m.active = append(m.active[:k], m.active[k+1:]...)
-			return
-		}
-	}
-}
-
-// ---- Comum ----
-
-func (m Model) header() string {
-	title := titleStyle.Render("SPOTDOWN")
-	if m.cfg.Version != "" {
-		title += " " + subtleStyle.Render(m.cfg.Version)
-	}
-	steps := []string{"Links", "Leitura", "Opções", "Revisão", "Download", "Fim"}
-	var crumbs string
-	for i, s := range steps {
-		if i > 0 {
-			crumbs += subtleStyle.Render(" › ")
-		}
-		if state(i) == m.state {
-			crumbs += accentStyle.Render(s)
-		} else {
-			crumbs += subtleStyle.Render(s)
-		}
-	}
-	out := title + "  " + crumbs
-	for _, w := range m.cfg.Warnings {
-		out += "\n" + warnStyle.Width(max(20, m.w)).Render("! "+w)
-	}
-	return out + "\n"
-}
-
-func (m Model) trunc(s string, extra int) string {
-	if m.w <= 0 {
-		return s
-	}
-	return ansi.Truncate(s, max(10, m.w-extra), "…")
-}
-
-func (m Model) View() string {
-	if m.w <= 0 {
+func (m *model) View() string {
+	if m.w == 0 {
 		return ""
 	}
-	var v string
-	switch m.state {
-	case stateInput:
-		v = m.viewInput()
-	case stateResolving:
-		v = m.viewResolving()
-	case stateOptions:
-		v = m.viewOptions()
-	case stateReview:
-		v = m.viewReview()
-	case stateRunning:
-		v = m.viewRunning()
-	case stateDone:
-		v = m.viewDone()
+	if m.w < 60 || m.h < 16 {
+		return "Terminal pequeno demais: aumente a janela (mínimo 60×16).\n\nq sai."
 	}
-	return lipgloss.NewStyle().Padding(1, 2, 0, 2).Render(v)
+	m.layout() // a linha de aviso pode aparecer e sumir depois de uma ação
+	return lipgloss.JoinVertical(lipgloss.Left, m.header(), m.body(), m.footer())
 }
 
-// window devolve o intervalo [start, end) de itens visíveis para manter o
-// cursor na tela.
-func window(cursor, total, rows int) (int, int) {
-	if total <= rows {
-		return 0, total
+func (m *model) header() string {
+	left := titleSt.Render(m.app.Title)
+	if m.app.Subtitle != nil {
+		if sub := m.app.Subtitle(); sub != "" {
+			left += faintSt.Render("  ·  " + sub)
+		}
 	}
-	start := max(0, cursor-rows/2)
-	end := start + rows
-	if end > total {
-		end = total
-		start = end - rows
+	line := " " + truncate(left, m.w-2)
+	if n := m.notice(); n != "" {
+		line += "\n " + noticeSt.Render(truncate("→ "+n, m.w-2))
 	}
-	return start, end
+	return line
+}
+
+func (m *model) notice() string {
+	if m.app.Notice == nil {
+		return ""
+	}
+	return m.app.Notice()
+}
+
+// truncate corta s em w colunas, com reticências.
+func truncate(s string, w int) string {
+	if lipgloss.Width(s) <= w || w < 2 {
+		return s
+	}
+	r := []rune(s)
+	for len(r) > 0 && lipgloss.Width(string(r))+1 > w {
+		r = r[:len(r)-1]
+	}
+	return string(r) + "…"
+}
+
+func (m *model) body() string {
+	h := m.bodyH()
+	side := m.sidebar()
+	sideBox, panelBox := activeBox, boxSt
+	if m.mode != browsing {
+		sideBox, panelBox = boxSt, activeBox
+	}
+	l := sideBox.Width(m.sideW()).Height(h).Render(side)
+	r := panelBox.Width(m.panelW() + 2).Height(h).Render(m.panel())
+	return lipgloss.JoinHorizontal(lipgloss.Top, l, r)
+}
+
+func (m *model) sidebar() string {
+	var b strings.Builder
+	i := 0
+	for si, s := range m.app.Sections {
+		if si > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(faintSt.Render(strings.ToUpper(s.Title)) + "\n")
+		for _, it := range s.Items {
+			label := it.Label
+			switch {
+			case i == m.cursor && m.mode == browsing:
+				label = selSt.Render("▸ " + label)
+			case i == m.cursor:
+				label = selSt.Render("● " + label)
+			default:
+				label = "  " + label
+			}
+			b.WriteString(label + "\n")
+			i++
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func (m *model) panel() string {
+	it := m.item()
+	title := titleSt.Render(it.Label)
+	if m.mode != browsing {
+		return title + "\n\n" + m.vp.View()
+	}
+	var parts []string
+	if m.desc != "" {
+		parts = append(parts, wrap(m.desc, m.panelW()))
+	}
+	if it.CLI != "" {
+		parts = append(parts, faintSt.Render("Pelo terminal:")+"\n"+wrap(faintSt.Render(it.CLI), m.panelW()))
+	}
+	body := strings.Join(parts, "\n\n")
+	// Mantém a descrição dentro da caixa: corta o que não couber.
+	if lines := strings.Split(body, "\n"); len(lines) > m.bodyH()-2 {
+		body = strings.Join(lines[:m.bodyH()-3], "\n") + "\n" + faintSt.Render("…")
+	}
+	return title + "\n\n" + body
+}
+
+func (m *model) footer() string {
+	var keys string
+	switch {
+	case m.form != nil:
+		keys = "↑↓←→ escolher · enter confirmar · esc cancelar"
+	case m.mode == running && m.cancelAsk:
+		keys = "ctrl+c de novo cancela · esc continua"
+	case m.mode == running:
+		keys = "executando… · ↑↓ rolar · ctrl+c cancelar"
+	case m.mode == done:
+		keys = "enter/esc voltar ao menu · ↑↓ rolar"
+	default:
+		keys = "↑↓ navegar · enter abrir · q sair"
+	}
+	return faintSt.Render(" " + keys)
 }

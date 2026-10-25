@@ -257,3 +257,10 @@ func (a *api) playlist(ctx context.Context, id string) (string, []apiTrack, erro
 	}
 	return "", nil, fmt.Errorf("API do Spotify: playlist não encontrada (playlists editoriais do Spotify não são liberadas para apps novos)")
 }
+
+// CheckCredentials confere Client ID/Secret pedindo um token à API.
+func CheckCredentials(ctx context.Context, id, secret string) error {
+	a := &api{hc: &http.Client{Timeout: 15 * time.Second}, lim: newLimiter(0), id: id, secret: secret}
+	_, err := a.auth(ctx)
+	return err
+}

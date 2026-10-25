@@ -1,29 +1,24 @@
 // spotdown baixa faixas, álbuns e playlists do Spotify: metadados das
 // páginas públicas do Spotify, áudio do YouTube Music via yt-dlp, tags/capa/
-// letra no arquivo e caminho de saída por template (como o spotdl) — com uma
-// TUI para colar links, ajustar as opções e acompanhar os downloads.
+// letra no arquivo e caminho de saída por template (como o spotdl). Sem
+// links, abre a TUI; com links, baixa direto.
 package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
-	"golang.org/x/term"
-
+	"github.com/vinicgobbi/spotdown/internal/cli"
 	"github.com/vinicgobbi/spotdown/internal/config"
-	"github.com/vinicgobbi/spotdown/internal/download"
-	"github.com/vinicgobbi/spotdown/internal/engine"
 	"github.com/vinicgobbi/spotdown/internal/lyrics"
 	"github.com/vinicgobbi/spotdown/internal/pathtpl"
-	"github.com/vinicgobbi/spotdown/internal/plain"
 	"github.com/vinicgobbi/spotdown/internal/spotify"
-	"github.com/vinicgobbi/spotdown/internal/tui"
+	"github.com/vinicgobbi/spotdown/internal/ui"
 	"github.com/vinicgobbi/spotdown/internal/ytmusic"
 )
 
@@ -33,8 +28,6 @@ var version = "dev"
 type options struct {
 	cfg        config.Config
 	configPath string
-	yes        bool
-	noTUI      bool
 	dryRun     bool
 	save       bool
 	version    bool
@@ -59,10 +52,7 @@ func parseFlags(o *options) (urls []string) {
 	fs.IntVar(&c.Threads, "threads", c.Threads, "downloads simultâneos (1 a 16)")
 	fs.StringVar(&c.YtDlp, "yt-dlp", c.YtDlp, "caminho do yt-dlp")
 	fs.StringVar(&c.Cookies, "cookies", c.Cookies, "cookies.txt para o yt-dlp (opcional)")
-	fs.BoolVar(&o.yes, "yes", false, "com links na linha de comando, baixar direto sem revisar")
-	fs.BoolVar(&o.yes, "y", false, "atalho para --yes")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "só listar as faixas e os caminhos que seriam gerados, sem baixar")
-	fs.BoolVar(&o.noTUI, "no-tui", false, "saída em texto simples (padrão quando não há terminal)")
 	fs.BoolVar(&o.save, "save-config", false, "gravar as opções passadas por flag no arquivo de configuração")
 	fs.BoolVar(&o.vars, "vars", false, "listar as variáveis do template e sair")
 	fs.BoolVar(&o.version, "version", false, "mostrar a versão e sair")
@@ -70,12 +60,12 @@ func parseFlags(o *options) (urls []string) {
 		fmt.Fprintf(os.Stderr, `Uso: spotdown [opções] [LINK...]
 
 Baixa faixas, álbuns e playlists do Spotify (links open.spotify.com ou
-spotify:...). Sem links, abre a interface para colá-los.
+spotify:...). Sem links, abre a interface interativa.
 
 Exemplos:
   spotdown
   spotdown -o "{artist}/{album}/{track-number:02} - {title}" --format opus LINK
-  spotdown --m3u --m3u-name "Playlists/{list-name}.m3u8" -y LINK_DA_PLAYLIST
+  spotdown --m3u --m3u-name "Playlists/{list-name}.m3u8" LINK_DA_PLAYLIST
 
 Opções:
 `)
@@ -113,12 +103,12 @@ func run() int {
 			o.configPath = os.Args[i+2]
 		}
 	}
-	cfg, created, err := config.Load(o.configPath)
+	file, created, err := config.Load(o.configPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "erro:", err)
+		fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
 		return 2
 	}
-	o.cfg = cfg
+	o.cfg = file
 	urls := parseFlags(&o)
 
 	if o.version {
@@ -132,58 +122,49 @@ func run() int {
 		return 0
 	}
 	if err := o.cfg.Validate(); err != nil {
-		fmt.Fprintln(os.Stderr, "erro:", err)
+		fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
 		return 2
 	}
 	if o.save {
 		if err := config.Save(o.configPath, o.cfg); err != nil {
-			fmt.Fprintln(os.Stderr, "erro:", err)
+			fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
 			return 2
 		}
+		file = o.cfg
 		fmt.Fprintln(os.Stderr, "configuração gravada em", o.configPath)
 	}
 	// Depois de gravar: credenciais do ambiente não vão parar no arquivo.
 	o.cfg.ApplyEnv()
 
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
+	env := &cli.Env{UI: ui.New(), Cfg: o.cfg, File: file, ConfigPath: o.configPath, Version: version}
 
-	var warnings []string
-	if created {
-		warnings = append(warnings, "configuração criada em "+o.configPath)
-	}
-	w, err := download.CheckTools(ctx, download.Options{YtDlp: o.cfg.YtDlp}, time.Now())
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "erro:", err)
-		return 2
-	}
-	if w != "" {
-		warnings = append(warnings, w)
-	}
-
-	interactive := term.IsTerminal(int(os.Stdout.Fd())) && term.IsTerminal(int(os.Stdin.Fd()))
-	if o.noTUI || o.dryRun || !interactive {
-		if len(urls) == 0 {
-			fmt.Fprintln(os.Stderr, "erro: sem terminal interativo, passe os links na linha de comando")
+	if len(urls) == 0 {
+		if !env.UI.Interactive {
+			fmt.Fprintln(os.Stderr, ui.ErrorText("sem terminal interativo, passe os links na linha de comando"))
 			return 2
 		}
-		return runPlain(ctx, o.cfg, urls, warnings, o.dryRun)
+		env.CheckTools(context.Background())
+		if err := cli.Interactive(env); err != nil {
+			fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
+			return 1
+		}
+		return 0
 	}
 
-	// A TUI trata o Ctrl+C sozinha (pede confirmação durante os downloads).
-	stop()
-	m := tui.New(tui.Config{
-		Cfg: o.cfg, ConfigPath: o.configPath, URLs: urls, Yes: o.yes,
-		Warnings: warnings, Version: version,
-	})
-	final, err := tea.NewProgram(m, tea.WithAltScreen()).Run()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "erro:", err)
-		return 1
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	if created {
+		env.UI.Hint("configuração criada em %s", o.configPath)
 	}
-	if fin := final.(tui.Model).Result(); fin != nil {
-		fmt.Println(plain.Summary(*fin))
-		return exitCode(*fin)
+	fin, err := cli.Download(ctx, env, urls, cli.DownloadOptions{DryRun: o.dryRun})
+	switch {
+	case errors.Is(err, context.Canceled):
+		return 130
+	case err != nil:
+		fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
+		return 2
+	case cli.Failed(fin):
+		return 1
 	}
 	return 0
 }
@@ -191,43 +172,4 @@ func run() int {
 func setUserAgents() {
 	ua := "spotdown/" + version + " (+https://github.com/vinicgobbi/spotdown)"
 	spotify.UserAgent, ytmusic.UserAgent, lyrics.UserAgent = ua, ua, ua
-}
-
-func runPlain(ctx context.Context, cfg config.Config, urls []string, warnings []string, dryRun bool) int {
-	p := &plain.Printer{W: os.Stdout, Color: term.IsTerminal(int(os.Stdout.Fd()))}
-	for _, w := range warnings {
-		p.Handle(engine.WarningEvent{Msg: w})
-	}
-	sp := spotify.New(spotify.Options{
-		ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret,
-		CacheDir: config.CacheDir(), AlbumDetails: engine.NeedsAlbumDetails(cfg),
-	})
-	lists := engine.Resolve(ctx, sp, urls, p.Handle)
-	if len(lists) == 0 {
-		return 1
-	}
-	jobs, err := engine.Plan(cfg, lists)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "erro:", err)
-		return 2
-	}
-	if dryRun {
-		for _, j := range jobs {
-			fmt.Println(j.Path)
-		}
-		return 0
-	}
-	p.Total = len(jobs)
-	fin := engine.NewRunner(cfg).Run(ctx, jobs, lists, p.Handle)
-	return exitCode(fin)
-}
-
-// exitCode: 0 tudo certo, 1 se alguma faixa falhou ou ficou sem correspondência.
-func exitCode(f engine.FinishedEvent) int {
-	for _, r := range f.Results {
-		if !r.Status.OK() {
-			return 1
-		}
-	}
-	return 0
 }
