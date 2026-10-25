@@ -261,6 +261,7 @@ func (r *reporter) handle(ev any) {
 		r.status()
 	case engine.FinishedEvent:
 		u.Status("")
+		u.Tasks("", nil)
 		u.Println()
 		summary(u, ev)
 	}
@@ -277,7 +278,11 @@ func (r *reporter) line(res engine.Result) {
 		if res.Lyrics {
 			extra = " ♪"
 		}
-		u.Printf("%s %s %s%s\n", n, u.Tone(ui.Good, "✓"), name, u.Faint(extra+"  → "+r.rel(res.Job.Path)))
+		if u.Host == nil {
+			// No modo texto não há quadro de tarefas: o caminho ajuda a achar o arquivo.
+			extra += "  → " + r.rel(res.Job.Path)
+		}
+		u.Printf("%s %s %s%s\n", n, u.Tone(ui.Good, "✓"), name, u.Faint(extra))
 	case engine.Skipped:
 		u.Printf("%s %s\n", n, u.Faint("· "+name+" (já existe)"))
 	case engine.Retagged:
@@ -295,29 +300,24 @@ func (r *reporter) line(res engine.Result) {
 	}
 }
 
-// status mostra o andamento: total e as faixas em curso (até 3).
+// status atualiza o quadro da TUI com o total e todas as faixas em curso.
 func (r *reporter) status() {
 	if r.u.Host == nil || r.total == 0 {
 		return
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "Baixando %d/%d", r.done, r.total)
-	for k, i := range r.active {
-		if k == 3 {
-			fmt.Fprintf(&b, "\n  … e mais %d", len(r.active)-3)
-			break
-		}
-		st := r.stage[i]
+	tasks := make([]ui.Task, 0, len(r.active))
+	for _, i := range r.active {
+		st, frac := r.stage[i], -1.0
 		if st == "" {
 			st = "iniciando"
 		}
 		if st == "baixando" {
-			st = fmt.Sprintf("baixando %.0f%%", r.frac[i]*100)
+			frac = r.frac[i]
 		}
 		t := r.jobs[i].Track
-		fmt.Fprintf(&b, "\n  %s — %s", t.ArtistsString()+" - "+t.Title, st)
+		tasks = append(tasks, ui.Task{Name: t.ArtistsString() + " - " + t.Title, Stage: st, Frac: frac})
 	}
-	r.u.Status("%s", b.String())
+	r.u.Tasks(fmt.Sprintf("Baixando %d/%d", r.done, r.total), tasks)
 }
 
 // summary resume a execução.

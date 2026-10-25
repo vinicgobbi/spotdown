@@ -30,10 +30,19 @@ type UI struct {
 }
 
 // Host roda um formulário dentro de outro programa; devolve ErrAborted
-// quando o usuário cancela. SetStatus troca a linha de status ao vivo.
+// quando o usuário cancela. SetStatus troca a linha de status ao vivo e
+// SetTasks o quadro das tarefas em curso.
 type Host interface {
 	RunForm(*huh.Form) error
 	SetStatus(string)
+	SetTasks(title string, tasks []Task)
+}
+
+// Task é uma tarefa em curso no quadro da TUI (ex.: uma faixa baixando).
+type Task struct {
+	Name  string
+	Stage string
+	Frac  float64 // progresso de 0 a 1; < 0 não mostra barra
 }
 
 var ErrAborted = errors.New("cancelado")
@@ -118,6 +127,14 @@ func ErrorText(s string) string              { return errStyle.Render("erro: ") 
 func (u *UI) Status(format string, a ...any) {
 	if u.Host != nil {
 		u.Host.SetStatus(fmt.Sprintf(format, a...))
+	}
+}
+
+// Tasks troca o quadro das tarefas em curso; title "" o esconde. Como
+// Status, fora da TUI não faz nada.
+func (u *UI) Tasks(title string, tasks []Task) {
+	if u.Host != nil {
+		u.Host.SetTasks(title, tasks)
 	}
 }
 

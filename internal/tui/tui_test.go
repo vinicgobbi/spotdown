@@ -191,3 +191,44 @@ func TestRebuildAfterAction(t *testing.T) {
 		t.Fatalf("installed=%v refs=%d item=%q\n%s", installed, len(m.refs), m.item().Label, m.View())
 	}
 }
+
+// TestTasksBox: as faixas em curso ficam num quadro abaixo do log, com
+// todas as que couberem e o resto resumido.
+func TestTasksBox(t *testing.T) {
+	u := &ui.UI{Out: io.Discard, Interactive: true}
+	m := newModel(u, App{Title: "t", Sections: []Section{{Title: "A", Items: []Item{{Label: "x"}}}}})
+	m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m.mode = running
+	m.Update(outMsg("linha do log\n"))
+	m.Update(tasksMsg{"Baixando 2/10", []ui.Task{
+		{Name: "Artista - Faixa A", Stage: "buscando", Frac: -1},
+		{Name: "Artista - Faixa B", Stage: "baixando", Frac: 0.5},
+	}})
+	v := m.View()
+	for _, s := range []string{"linha do log", "Baixando 2/10", "Faixa A", "buscando", "Faixa B", "50%"} {
+		if !strings.Contains(v, s) {
+			t.Fatalf("falta %q:\n%s", s, v)
+		}
+	}
+	if strings.Index(v, "linha do log") > strings.Index(v, "Baixando 2/10") {
+		t.Fatalf("quadro acima do log:\n%s", v)
+	}
+	if n := len(strings.Split(v, "\n")); n != 30 {
+		t.Fatalf("altura %d, esperado 30:\n%s", n, v)
+	}
+
+	many := make([]ui.Task, 40)
+	for i := range many {
+		many[i] = ui.Task{Name: "faixa", Stage: "tags", Frac: -1}
+	}
+	m.Update(tasksMsg{"Baixando 0/40", many})
+	if v := m.View(); !strings.Contains(v, "… e mais") || len(strings.Split(v, "\n")) != 30 {
+		t.Fatalf("view:\n%s", v)
+	}
+
+	m.cancel = func() {}
+	m.Update(doneMsg{})
+	if strings.Contains(m.View(), "Baixando") {
+		t.Fatal("quadro ficou depois do fim")
+	}
+}

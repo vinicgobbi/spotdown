@@ -132,8 +132,12 @@ const (
 type (
 	outMsg    string
 	statusMsg string
-	doneMsg   struct{ err error }
-	formMsg   struct {
+	tasksMsg  struct {
+		title string
+		tasks []ui.Task
+	}
+	doneMsg struct{ err error }
+	formMsg struct {
 		form *huh.Form
 		done chan error
 	}
@@ -158,6 +162,10 @@ func (h *host) RunForm(f *huh.Form) error {
 
 func (h *host) SetStatus(s string) { h.p.Send(statusMsg(s)) }
 
+func (h *host) SetTasks(title string, tasks []ui.Task) {
+	h.p.Send(tasksMsg{title, append([]ui.Task(nil), tasks...)})
+}
+
 type model struct {
 	u    *ui.UI
 	app  App
@@ -170,6 +178,7 @@ type model struct {
 
 	log       strings.Builder
 	status    string
+	tasks     tasksMsg // quadro das tarefas em curso; title "" esconde
 	result    error
 	form      *huh.Form
 	formDone  chan error
@@ -252,6 +261,11 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.status = string(msg)
 		m.refresh()
 		return m, nil
+	case tasksMsg:
+		m.tasks = msg
+		m.layout()
+		m.refresh()
+		return m, nil
 	case formMsg:
 		m.form, m.formDone = msg.form.WithWidth(m.panelW()), msg.done
 		cmd := m.form.Init()
@@ -259,6 +273,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case doneMsg:
 		m.mode, m.result, m.status, m.cancelAsk = done, msg.err, "", false
+		m.tasks = tasksMsg{}
+		m.layout()
 		m.cancel()
 		m.cancel = nil
 		m.refresh()
@@ -344,7 +360,7 @@ func (m *model) move(d int) {
 
 func (m *model) start() {
 	it := m.item()
-	m.mode, m.result, m.status = running, nil, ""
+	m.mode, m.result, m.status, m.tasks = running, nil, "", tasksMsg{}
 	m.log.Reset()
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
@@ -405,9 +421,19 @@ func (m *model) bodyH() int {
 	return max(5, h)
 }
 
+// tasksH é a altura total do quadro de tarefas (com a borda); 0 sem quadro.
+// Cabe no máximo metade do corpo; o resto vira "… e mais N".
+func (m *model) tasksH() int {
+	if m.tasks.title == "" || m.mode == browsing {
+		return 0
+	}
+	rows := min(max(1, len(m.tasks.tasks)), max(1, m.bodyH()/2-3))
+	return rows + 1 + 2 // título + bordas
+}
+
 func (m *model) layout() {
 	m.vp.Width = m.panelW()
-	m.vp.Height = m.bodyH() - 2 // título do painel + linha em branco
+	m.vp.Height = max(1, m.bodyH()-m.tasksH()-2) // título do painel + linha em branco
 }
 
 // refresh remonta o conteúdo do painel de uma ação em andamento/concluída.
@@ -523,8 +549,48 @@ func (m *model) body() string {
 		sideBox, panelBox = boxSt, activeBox
 	}
 	l := sideBox.Width(m.sideW()).Height(h).Render(side)
-	r := panelBox.Width(m.panelW() + 2).Height(h).Render(m.panel())
+	th := m.tasksH()
+	r := panelBox.Width(m.panelW() + 2).Height(h - th).Render(m.panel())
+	if th > 0 {
+		r = lipgloss.JoinVertical(lipgloss.Left, r,
+			boxSt.Width(m.panelW()+2).Height(th-2).Render(m.tasksView(th-3)))
+	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, l, r)
+}
+
+// tasksView desenha o quadro de tarefas com até rows linhas de faixas.
+func (m *model) tasksView(rows int) string {
+	ts := m.tasks.tasks
+	lines := []string{titleSt.Render(m.tasks.title)}
+	if len(ts) == 0 {
+		lines = append(lines, faintSt.Render("aguardando…"))
+	}
+	shown := ts
+	if len(ts) > rows {
+		shown = ts[:rows-1]
+	}
+	w := m.panelW()
+	for _, t := range shown {
+		right := t.Stage
+		if t.Frac >= 0 {
+			right = bar(t.Frac, 10) + fmt.Sprintf(" %3.0f%%", t.Frac*100)
+		}
+		right = faintSt.Render(right)
+		nameW := max(8, w-lipgloss.Width(right)-2)
+		name := truncate(t.Name, nameW)
+		pad := strings.Repeat(" ", max(1, w-lipgloss.Width(name)-lipgloss.Width(right)))
+		lines = append(lines, name+pad+right)
+	}
+	if len(shown) < len(ts) {
+		lines = append(lines, faintSt.Render(fmt.Sprintf("… e mais %d", len(ts)-len(shown))))
+	}
+	return strings.Join(lines, "\n")
+}
+
+// bar desenha uma barra de progresso de w colunas.
+func bar(f float64, w int) string {
+	n := int(max(0, min(1, f))*float64(w) + 0.5)
+	return okSt.Render(strings.Repeat("━", n)) + faintSt.Render(strings.Repeat("━", w-n))
 }
 
 func (m *model) sidebar() string {
