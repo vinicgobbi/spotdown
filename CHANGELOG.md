@@ -1,3 +1,9 @@
+## v0.6.0 (2026-10-25)
+
+### Feat
+
+- **tui**: quadro com as faixas baixando abaixo do log
+
 ## v0.5.0 (2026-10-25)
 
 ### Feat
