@@ -1,0 +1,3 @@
+# Binário compilado localmente (as releases são publicadas pela action)
+/spotdown
+/dist/

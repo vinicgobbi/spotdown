@@ -1,0 +1,148 @@
+# A cada push na main:
+# Actions fixadas pelo SHA do commit (a tag fica no comentário): uma tag pode
+# ser movida para outro código; o SHA, não. O Dependabot propõe as
+# atualizações (.github/dependabot.yml).
+#
+#   1. test    — go vet, go test, staticcheck e govulncheck
+#   2. bump    — commitizen calcula a próxima versão pelos Conventional Commits,
+#                atualiza o CHANGELOG.md, cria o commit "bump: ..." e a tag vX.Y.Z
+#                (se não houver commit feat/fix/BREAKING, não há release)
+#   3. build   — compila os binários estáticos (amd64 e arm64), gera o atestado
+#                de proveniência (verificável com "gh attestation verify") e
+#                sobe tudo como artefato
+#   4. release — publica a release da tag e apaga os artefatos
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    # O commit "bump:" criado pelo próprio workflow não dispara nova release.
+    # Disparado à mão, só vale na main (senão criaria tag/release de outra branch).
+    if: ${{ github.ref == 'refs/heads/main' && !startsWith(github.event.head_commit.message, 'bump:') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      # ffmpeg para os testes de tags (sem ele, esses testes são pulados).
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - run: go vet ./...
+      - run: go test ./...
+      - run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  bump:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.cz.outputs.version }}
+      bumped: ${{ steps.result.outputs.bumped }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: cz
+        uses: commitizen-tools/commitizen-action@338bbd841b75aaee6bf5340e1fa12f6ab58ff9ff # 0.27.1
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          changelog_increment_filename: release-notes.md
+      - id: result
+        env:
+          VERSION: ${{ steps.cz.outputs.version }}
+          PREVIOUS: ${{ steps.cz.outputs.previous_version }}
+        run: |
+          if [ -n "$VERSION" ] && [ "$VERSION" != "$PREVIOUS" ]; then
+            echo "bumped=true" >> "$GITHUB_OUTPUT"
+            echo "Nova versão: v$VERSION" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+            echo "Nenhum commit feat/fix/BREAKING desde a última versão: sem release." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.result.outputs.bumped == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release-notes
+          path: release-notes.md
+          retention-days: 1
+
+  build:
+    needs: bump
+    if: needs.bump.outputs.bumped == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # assinatura Sigstore do atestado
+      attestations: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: v${{ needs.bump.outputs.version }}
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+      - name: Compilar
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          VERSION: v${{ needs.bump.outputs.version }}
+        run: |
+          mkdir -p dist
+          for arch in amd64 arm64; do
+            GOARCH=$arch go build -trimpath -ldflags "-s -w -X main.version=$VERSION" \
+              -o "dist/spotdown-linux-$arch" ./cmd/spotdown
+          done
+          cd dist
+          for f in spotdown-linux-*; do sha256sum "$f" > "$f.sha256"; done
+      - name: Atestado de proveniência
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            dist/spotdown-linux-amd64
+            dist/spotdown-linux-arm64
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: spotdown-linux
+          path: dist/
+          retention-days: 1
+
+  release:
+    needs: [bump, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write # apagar os artefatos depois de publicar
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Publicar release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v${{ needs.bump.outputs.version }}
+        run: |
+          gh release create "$TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$TAG" \
+            --notes-file dist/release-notes.md \
+            dist/spotdown-linux-*
+      - name: Apagar artefatos da action
+        uses: geekyeggo/delete-artifact@176a747ab7e287e3ff4787bf8a148716375ca118 # v6.0.0
+        with:
+          name: |
+            spotdown-linux
+            release-notes
