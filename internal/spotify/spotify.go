@@ -1,7 +1,9 @@
-// Package spotify transforma links do Spotify em faixas com metadados, sem
-// login: a lista vem do embed e os detalhes (álbum, número, disco, data,
-// gravadora) da página pública de cada faixa/álbum. Com Client ID/Secret
-// configurados, usa a API oficial, que não tem o limite de 100 faixas do embed.
+// Package spotify transforma links do Spotify em faixas com metadados.
+//
+// Por padrão, sem conta: a lista das playlists vem do GraphQL do web player
+// (webplayer.go; o embed sozinho para em 100 faixas) e os detalhes (álbum,
+// número, disco, data, gravadora) das páginas públicas de faixas e álbuns.
+// Opcionalmente, a API oficial com as credenciais do usuário (api.go, login.go).
 package spotify
 
 import (
@@ -37,6 +39,9 @@ type Client struct {
 	cache      *diskCache
 	workers    int
 	albumExtra bool
+	webPlayer  bool
+	gqlHash    string
+	gqlLim     *limiter
 
 	mu     sync.Mutex
 	albums map[string]*albumEntry
@@ -57,6 +62,9 @@ type Options struct {
 	// (gravadora, gênero, quantidade de discos). Sem ela, os dados de álbum
 	// que já vêm na faixa bastam e a playlist sai com bem menos requisições.
 	AlbumDetails bool
+	// WebPlayer liga o GraphQL do web player para playlists (ver webplayer.go).
+	WebPlayer   bool
+	GraphQLHash string // vazio = DefaultGraphQLHash
 }
 
 // Intervalos mínimos entre requisições a cada host.
@@ -73,6 +81,9 @@ func New(o Options) *Client {
 		cache:      newDiskCache(o.CacheDir),
 		workers:    6,
 		albumExtra: o.AlbumDetails,
+		webPlayer:  o.WebPlayer,
+		gqlHash:    firstNonEmpty(o.GraphQLHash, DefaultGraphQLHash),
+		gqlLim:     newLimiter(gqlEvery),
 		albums:     map[string]*albumEntry{},
 	}
 	var user *userAuth
@@ -130,8 +141,11 @@ func (c *Client) Resolve(ctx context.Context, link string, progress func(done, t
 	return l, nil
 }
 
+// openBase é variável só para os testes apontarem para um servidor falso.
+var openBase = "https://open.spotify.com/"
+
 func (c *Client) page(ctx context.Context, path string) ([]byte, error) {
-	return get(ctx, c.hc, c.pageLim, "https://open.spotify.com/"+path, nil)
+	return get(ctx, c.hc, c.pageLim, openBase+path, nil)
 }
 
 // ---- faixa ----
@@ -309,6 +323,24 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 	if err != nil {
 		return nil, fmt.Errorf("playlist %s: %w", id, err)
 	}
+	if c.webPlayer {
+		if e.token == "" {
+			warnings = append(warnings, "o embed não trouxe o token do web player — usando só o embed (até 100 faixas)")
+		} else if name, tracks, err := c.webPlaylist(ctx, id, e.token); err == nil {
+			l := &List{Name: firstNonEmpty(name, e.Name, e.Title), Tracks: tracks, Warnings: warnings}
+			c.enrichFromAlbums(ctx, l, progress)
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			return l, nil
+		} else {
+			if ctx.Err() != nil {
+				return nil, ctx.Err()
+			}
+			warnings = append(warnings, "web player do Spotify: "+err.Error()+" — usando só o embed (até 100 faixas)")
+		}
+	}
+
 	l := &List{Name: firstNonEmpty(e.Name, e.Title), Tracks: e.tracks(), Warnings: warnings}
 	if len(e.TrackList) >= embedLimit {
 		// O embed para em 100; a página da playlist informa o total real.
@@ -321,8 +353,10 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 		if l.Total > len(l.Tracks) {
 			w := fmt.Sprintf("a página pública só traz as primeiras %d de %d faixas", len(l.Tracks), l.Total)
 			switch {
+			case c.webPlayer:
+				// O motivo (falha do web player) já está nos avisos.
 			case !c.LoggedIn():
-				w += "; se a playlist for sua ou colaborativa, entre com a conta do Spotify (Opções › API do Spotify, ou spotdown --login)"
+				w += "; se a playlist for sua ou colaborativa, entre com a conta do Spotify (Opções › Fonte do Spotify, ou spotdown --login)"
 			case restricted:
 				w += "; a API do Spotify só entrega playlists suas ou colaborativas, e esta não é"
 			}
@@ -347,6 +381,31 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 		l.Warnings = append(l.Warnings, fmt.Sprintf("%d faixa(s) sem detalhes do álbum (só título/artista/duração)", n))
 	}
 	return l, nil
+}
+
+// enrichFromAlbums completa as faixas da playlist com a página de cada
+// álbum (com cache: uma requisição por álbum, não por faixa). Faixas sem
+// álbum conhecido usam a página da própria faixa.
+func (c *Client) enrichFromAlbums(ctx context.Context, l *List, progress func(int, int)) {
+	var failed atomic.Int32
+	c.parallel(ctx, l.Tracks, progress, func(t *track.Track) error {
+		if t.AlbumID != "" {
+			if e := c.albumPage(ctx, t.AlbumID); e.err == nil {
+				e.page.apply(t)
+				return nil
+			}
+		}
+		full, err := c.trackDetails(ctx, t.ID)
+		if err != nil {
+			failed.Add(1)
+			return err
+		}
+		*t = full
+		return nil
+	})
+	if n := failed.Load(); n > 0 {
+		l.Warnings = append(l.Warnings, fmt.Sprintf("%d faixa(s) sem detalhes do álbum (só título/artista/duração)", n))
+	}
 }
 
 // applyAPIAlbum completa a faixa vinda da API com a página pública do álbum

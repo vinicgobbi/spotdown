@@ -7,7 +7,7 @@ Spotify (páginas públicas)  →  YouTube Music (busca)  →  yt-dlp + ffmpeg  
        metadados                 match do áudio             download           arquivo final
 ```
 
-- **Sem login**: os metadados vêm das páginas públicas do Spotify (embed e página da faixa/álbum).
+- **Sem login**: os metadados vêm das páginas públicas do Spotify, e as playlists inteiras do web player, pelo mesmo método do downtify. A API oficial, com as suas credenciais, é opcional.
 - **Caminho de saída por template**, com as mesmas variáveis do spotdl, além de zeros à esquerda (`{track-number:02}`).
 - **M3U** para cada álbum e playlist baixado (faixas soltas não geram playlist).
 - **Letras** do [LRCLIB](https://lrclib.net) (sincronizadas quando houver): embutidas no arquivo, em `.lrc` ao lado, nos dois ou desligadas.
@@ -58,7 +58,7 @@ Teclas: `↑↓` navega, `enter` abre e `q` sai. Durante uma ação, `ctrl+c` du
 | `{disc-number}` / `{disc-count}` | disco / quantidade de discos |
 | `{year}` / `{original-date}` | ano / data (AAAA-MM-DD) |
 | `{duration}` | duração em segundos |
-| `{isrc}` | ISRC (só pela API do Spotify) |
+| `{isrc}` | ISRC (só com `spotify_source = "official"`) |
 | `{publisher}` | gravadora |
 | `{genre}` | gênero (quase nunca disponível) |
 | `{track-id}` | ID da faixa no Spotify |
@@ -86,33 +86,39 @@ Com `--m3u` (ou `m3u = true`), cada álbum e cada playlist ganha um `.m3u8`. Por
 
 O arquivo fica em `~/.config/spotdown/config.toml` e é criado na primeira execução, com todos os campos comentados. As flags têm prioridade sobre o arquivo, e `--save-config` grava as flags passadas como novo padrão.
 
-### Playlists com mais de 100 faixas
+### Fonte do Spotify: web player (padrão) ou API oficial
 
-Sem login, o Spotify só libera as **primeiras 100 faixas** de uma playlist pela página pública. O spotdown avisa quando isso acontece.
+O embed público do Spotify para em 100 faixas. Para trazer playlists inteiras, o spotdown tem duas fontes, configuráveis em **Opções › Fonte do Spotify**, em `spotify_source` no config ou pela flag `--spotify-source`.
 
-Para **playlists suas ou colaborativas**, dá para pegar a playlist inteira entrando com a sua conta do Spotify. Para playlists de outras pessoas não há saída: desde [fevereiro de 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide), o Spotify não entrega mais o conteúdo delas pela API a apps pessoais (*Development Mode*). Elas continuam limitadas a 100 faixas.
+**`web` — web player (padrão, sem conta).** É o mesmo método do [downtify](https://github.com/henriquesebastiao/downtify):
+
+1. O embed traz um token anônimo do player embutido.
+2. Com esse token, o spotdown chama a API GraphQL interna do web player (`api-partner.spotify.com/pathfinder`, consulta `fetchPlaylist`).
+3. A playlist vem inteira, de qualquer pessoa, de 100 em 100: são só 3 requisições para 290 faixas.
+4. Álbum, data e gravadora vêm da página pública de cada álbum, com cache, uma requisição por álbum e não por faixa.
+
+Cuidados com essa fonte:
+
+- **Não é uma API pública** e vai contra os termos de uso do Spotify. Pode parar de funcionar, ou o IP pode ser limitado, sem aviso.
+- **O hash da consulta muda.** Quando o Spotify atualiza o player, aparece o aviso `PersistedQueryNotFound` e as playlists caem para o embed, até 100 faixas. Para voltar a funcionar sem esperar uma release, preencha `spotify_graphql_hash` com o valor novo, tirado do código do web player ou do `_GRAPHQL_HASH` em `downtify/spotify.py`.
+- **Qualquer outra falha** também cai para o embed, com um aviso.
+
+**`official` — API oficial, com as suas credenciais.** É estável e documentada, mas, desde [fevereiro de 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide), apps pessoais (*Development Mode*) só recebem o conteúdo de playlists **suas ou colaborativas**, e só depois do login da sua conta. As de outras pessoas ficam em 100 faixas. O dono do app precisa ter **Spotify Premium**. Para configurar:
 
 1. Em <https://developer.spotify.com/dashboard>, clique em **Create app** e preencha nome e descrição (qualquer texto).
 2. Em **Redirect URIs**, coloque exatamente `http://127.0.0.1:8888/callback` e clique em **Add**. O login volta para esse endereço, e o spotdown escuta ali enquanto você entra. O Spotify não aceita `localhost`.
 3. Em **Which API/SDKs are you planning to use?**, marque **Web API**, aceite os termos e salve.
 4. Em **Settings**, copie o **Client ID**. O secret é opcional.
-5. Entre com a conta: na interface, em **Opções › API do Spotify › Entrar com a conta do Spotify**, ou no terminal:
+5. Em **Opções › Fonte do Spotify**, escolha **Usar a API oficial** e depois **Entrar com a conta do Spotify**. Pelo terminal:
 
    ```sh
    spotdown --login     # abre o navegador; autorize e volte ao terminal
    spotdown --logout    # apaga o login
    ```
 
-O login usa o fluxo *Authorization Code + PKCE*, que não precisa do secret, e pede só permissão para ler suas playlists (`playlist-read-private` e `playlist-read-collaborative`). O token fica em `~/.config/spotdown/spotify-token.json` e é renovado sozinho.
+O login usa o fluxo *Authorization Code + PKCE*, que não precisa do secret, e pede só permissão para ler suas playlists (`playlist-read-private` e `playlist-read-collaborative`). O token fica em `~/.config/spotdown/spotify-token.json` e é renovado sozinho. Se outra pessoa for usar o seu app, cadastre a conta dela em **User Management**, no dashboard.
 
-Duas exigências do Spotify para apps em *Development Mode*:
-
-- **O dono do app precisa ter Spotify Premium.**
-- Se outra pessoa for usar o seu app, cadastre a conta dela em **User Management**.
-
-O Client ID também pode ficar no config (`spotify_client_id`) ou nas variáveis `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`. O secret, se você informar, permite ler faixas e álbuns pela API sem login, o que traz o ISRC.
-
-Para economizar requisições, a consulta extra à página de cada álbum (gravadora, quantidade de discos) só é feita quando o template usa `{publisher}`, `{disc-count}` ou `{genre}`.
+O Client ID também pode ficar no config (`spotify_client_id`) ou nas variáveis `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`. Com a fonte `web`, as credenciais ficam guardadas, mas não são usadas.
 
 ## Arquivos
 

@@ -61,6 +61,8 @@ type embedEntity struct {
 		Sources []image `json:"sources"`
 	} `json:"coverArt"`
 	TrackList []embedTrack `json:"trackList"`
+
+	token string // token anônimo do player embutido (ver webplayer.go)
 }
 
 type embedTrack struct {
@@ -84,6 +86,11 @@ func parseEmbed(html []byte) (*embedEntity, error) {
 					Data struct {
 						Entity embedEntity `json:"entity"`
 					} `json:"data"`
+					Settings struct {
+						Session struct {
+							AccessToken string `json:"accessToken"`
+						} `json:"session"`
+					} `json:"settings"`
 				} `json:"state"`
 			} `json:"pageProps"`
 		} `json:"props"`
@@ -92,6 +99,7 @@ func parseEmbed(html []byte) (*embedEntity, error) {
 		return nil, fmt.Errorf("embed: %w", err)
 	}
 	e := doc.Props.PageProps.State.Data.Entity
+	e.token = doc.Props.PageProps.State.Settings.Session.AccessToken
 	if e.ID == "" {
 		return nil, fmt.Errorf("embed sem dados (link privado ou removido?)")
 	}
@@ -171,6 +179,28 @@ type dateParts struct {
 	Year  int `json:"year"`
 	Month int `json:"month"`
 	Day   int `json:"day"`
+}
+
+// UnmarshalJSON aceita {year,month,day}, {isoString} ou uma string ISO e
+// nunca falha: uma data num formato inesperado não pode derrubar a faixa.
+func (d *dateParts) UnmarshalJSON(b []byte) error {
+	var obj struct {
+		Year      int    `json:"year"`
+		Month     int    `json:"month"`
+		Day       int    `json:"day"`
+		IsoString string `json:"isoString"`
+	}
+	var iso string
+	if json.Unmarshal(b, &obj) == nil {
+		d.Year, d.Month, d.Day = obj.Year, obj.Month, obj.Day
+		iso = obj.IsoString
+	} else {
+		_ = json.Unmarshal(b, &iso)
+	}
+	if d.Year == 0 && len(iso) >= 4 {
+		fmt.Sscanf(iso, "%4d-%2d-%2d", &d.Year, &d.Month, &d.Day)
+	}
+	return nil
 }
 
 func (d dateParts) String() string {

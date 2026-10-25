@@ -152,10 +152,10 @@ func App(env *Env) tui.App {
 					CLI: "spotdown --threads N LINK",
 				},
 				{
-					Label: "API do Spotify",
+					Label: "Fonte do Spotify",
 					Run:   func(ctx context.Context) error { return iAPI(ctx, env) },
 					Desc:  func() string { return apiDesc(env) },
-					CLI:   "spotdown --login  ·  spotdown --logout",
+					CLI:   "spotdown --spotify-source web|official  ·  spotdown --login  ·  spotdown --logout",
 				},
 			}},
 			{Title: "Sistema", Items: []tui.Item{
@@ -211,9 +211,12 @@ func settingsKV(env *Env) {
 	if c.M3U {
 		m3uText = c.M3UName
 	}
-	api := "sem login (playlists até 100 faixas)"
-	if who := LoggedUser(env); who != "" {
-		api = "conectada como " + who
+	api := "web player (playlists completas, sem conta)"
+	if c.Official() {
+		api = "API oficial, sem login (playlists até 100 faixas)"
+		if who := LoggedUser(env); who != "" {
+			api = "API oficial, conectada como " + who
+		}
 	}
 	env.UI.KV(
 		[2]string{"Destino", Tilde(filepath.Join(pathtpl.ExpandPath(c.OutputDir), c.Output))},
@@ -221,7 +224,7 @@ func settingsKV(env *Env) {
 		[2]string{"M3U", m3uText},
 		[2]string{"Letras", c.Lyrics},
 		[2]string{"Existentes", c.Overwrite},
-		[2]string{"API Spotify", api},
+		[2]string{"Spotify", api},
 	)
 }
 
@@ -444,6 +447,17 @@ func apiConfigured(c config.Config) bool { return c.SpotifyClientID != "" }
 func apiDesc(env *Env) string {
 	var b strings.Builder
 	c := env.Cfg
+	if !c.Official() {
+		b.WriteString(tui.Capture(env.UI, func() { env.UI.KV([2]string{"Fonte", "web player (padrão)"}) }))
+		b.WriteString("\n\nAs playlists vêm do web player do Spotify, pelo mesmo método do downtify: completas, de qualquer " +
+			"pessoa, sem app nem conta.\n\n" +
+			"Não é uma API pública: quando o Spotify atualizar o player, pode parar de funcionar até o hash da consulta " +
+			"ser atualizado (spotify_graphql_hash no arquivo de configuração). Enquanto isso, as playlists caem para o " +
+			"embed, limitado a 100 faixas.\n\n" +
+			"A alternativa é a API oficial, com o seu app e o login da sua conta: estável, mas o Spotify só entrega " +
+			"playlists suas ou colaborativas (as outras ficam em 100 faixas). Enter para trocar.")
+		return b.String()
+	}
 	app, conta, secret := "não configurado", "não conectada", "não (opcional)"
 	if c.SpotifyClientID != "" {
 		app = "Client ID " + c.SpotifyClientID[:min(6, len(c.SpotifyClientID))] + "…"
@@ -458,12 +472,11 @@ func apiDesc(env *Env) string {
 		secret = "configurado"
 	}
 	b.WriteString(tui.Capture(env.UI, func() {
-		env.UI.KV([2]string{"App", app}, [2]string{"Conta", conta}, [2]string{"Secret", secret})
+		env.UI.KV([2]string{"Fonte", "API oficial"}, [2]string{"App", app}, [2]string{"Conta", conta}, [2]string{"Secret", secret})
 	}))
-	b.WriteString("\n\nSem login, o Spotify só libera as primeiras 100 faixas de uma playlist. Entrando com a sua conta, " +
-		"playlists suas ou colaborativas vêm completas.\n\n" +
-		"Playlists de outras pessoas continuam limitadas a 100: desde fevereiro de 2026 o Spotify não entrega mais " +
-		"o conteúdo delas pela API a apps pessoais (Development Mode). Esses apps também exigem que o dono tenha Premium.\n\n" +
+	b.WriteString("\n\nCom a API oficial, playlists suas ou colaborativas vêm completas depois do login. As de outras pessoas " +
+		"ficam limitadas a 100 faixas: desde fevereiro de 2026 o Spotify não entrega o conteúdo delas a apps pessoais " +
+		"(Development Mode), que também exigem que o dono do app tenha Premium.\n\n" +
 		"Para criar o app:\n\n")
 	b.WriteString(tui.Capture(env.UI, func() { apiSteps(env.UI) }))
 	return b.String()
@@ -476,7 +489,7 @@ func apiSteps(u *ui.UI) {
 		"Redirect URIs: " + RedirectURI + " (clique em Add). Tem que ser exatamente esta; \"localhost\" é recusado.",
 		"Em \"Which API/SDKs\", marque Web API, aceite os termos e salve.",
 		"Em Settings, copie o Client ID (o secret é opcional).",
-		"Aqui, escolha \"Entrar com a conta do Spotify\" e autorize no navegador.",
+		"Aqui, em Fonte do Spotify, escolha \"Entrar com a conta do Spotify\" e autorize no navegador.",
 	}
 	for i, s := range steps {
 		u.Printf("  %d. %s\n", i+1, s)
@@ -485,7 +498,14 @@ func apiSteps(u *ui.UI) {
 
 func iAPI(ctx context.Context, env *Env) error {
 	u := env.UI
-	opts := []huh.Option[string]{huh.NewOption("Entrar com a conta do Spotify", "login")}
+	official := env.Cfg.Official()
+	var opts []huh.Option[string]
+	if official {
+		opts = append(opts, huh.NewOption("Usar o web player (padrão, sem conta)", "web"))
+	} else {
+		opts = append(opts, huh.NewOption("Usar a API oficial (com as suas credenciais)", "official"))
+	}
+	opts = append(opts, huh.NewOption("Entrar com a conta do Spotify", "login"))
 	if apiConfigured(env.Cfg) {
 		opts = append(opts, huh.NewOption("Trocar o Client ID / secret", "app"))
 	} else {
@@ -497,11 +517,26 @@ func iAPI(ctx context.Context, env *Env) error {
 	if apiConfigured(env.File) {
 		opts = append(opts, huh.NewOption("Remover o app e o login", "remove"))
 	}
-	what := "login"
-	if err := u.Select("API do Spotify", &what, opts...); err != nil {
+	what := opts[0].Value
+	if err := u.Select("Fonte do Spotify", &what, opts...); err != nil {
 		return err
 	}
 	switch what {
+	case "web":
+		if err := env.Save(func(c *config.Config) { c.SpotifySource = "web" }); err != nil {
+			return err
+		}
+		u.OK("Fonte: web player. As credenciais ficam guardadas, mas não são usadas.")
+		return nil
+	case "official":
+		if err := env.Save(func(c *config.Config) { c.SpotifySource = "official" }); err != nil {
+			return err
+		}
+		u.OK("Fonte: API oficial.")
+		if LoggedUser(env) != "" {
+			return nil
+		}
+		u.Println()
 	case "logout":
 		return Logout(env)
 	case "remove":

@@ -52,6 +52,7 @@ func parseFlags(o *options) (urls []string) {
 	fs.BoolVar(&c.M3UAbsolute, "m3u-absolute", c.M3UAbsolute, "caminhos absolutos no .m3u8")
 	fs.StringVar(&c.Lyrics, "lyrics", c.Lyrics, "letras: embed, lrc, both ou off")
 	fs.IntVar(&c.Threads, "threads", c.Threads, "downloads simultâneos (1 a 16)")
+	fs.StringVar(&c.SpotifySource, "spotify-source", c.SpotifySource, "de onde vêm as playlists: web (padrão, sem conta) ou official (API oficial com suas credenciais)")
 	fs.StringVar(&c.YtDlp, "yt-dlp", c.YtDlp, "caminho do yt-dlp")
 	fs.StringVar(&c.Cookies, "cookies", c.Cookies, "cookies.txt para o yt-dlp (opcional)")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "só listar as faixas e os caminhos que seriam gerados, sem baixar")

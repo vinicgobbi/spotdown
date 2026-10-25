@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -107,8 +108,12 @@ func TestEveryItemHasDescription(t *testing.T) {
 			}
 		}
 	}
+	if d := apiDesc(env); !strings.Contains(d, "web player (padrão)") || !strings.Contains(d, "downtify") {
+		t.Errorf("descrição do web player:\n%s", d)
+	}
+	env.Cfg.SpotifySource = "official"
 	if d := apiDesc(env); !strings.Contains(d, RedirectURI) || !strings.Contains(d, "Web API") {
-		t.Errorf("descrição da API sem a Redirect URI:\n%s", d)
+		t.Errorf("descrição da API oficial sem a Redirect URI:\n%s", d)
 	}
 }
 
@@ -122,5 +127,37 @@ func TestValidateLinks(t *testing.T) {
 	}
 	if n := len(SplitLinks(ok + ", https://open.spotify.com/playlist/37i9dQZF1DXcBWIGoYBM5M")); n != 3 {
 		t.Errorf("links=%d", n)
+	}
+}
+
+func TestSpotifyOptionsBySource(t *testing.T) {
+	c := config.Default()
+	c.SpotifyClientID, c.SpotifyClientSecret = "id", "secret"
+	if o := SpotifyOptions(c); !o.WebPlayer || o.ClientID != "" || o.TokenFile != "" {
+		t.Errorf("web player não pode usar as credenciais: %+v", o)
+	}
+	c.SpotifySource = "official"
+	if o := SpotifyOptions(c); o.WebPlayer || o.ClientID != "id" || o.ClientSecret != "secret" || o.TokenFile == "" {
+		t.Errorf("API oficial: %+v", o)
+	}
+}
+
+func TestSwitchSource(t *testing.T) {
+	env, out := testEnv(t, "1\n") // primeira opção: trocar de fonte
+	if err := iAPI(context.Background(), env); err == nil {
+		// Sem Client ID, trocar para a oficial segue para o cadastro do app
+		// (que fica sem resposta aqui) — o que importa é a fonte gravada.
+		t.Log(out.String())
+	}
+	if c := reload(t, env); c.SpotifySource != "official" {
+		t.Fatalf("source=%q\n%s", c.SpotifySource, out)
+	}
+	env2, _ := testEnv(t, "1\n")
+	env2.Cfg.SpotifySource, env2.File.SpotifySource = "official", "official"
+	if err := iAPI(context.Background(), env2); err != nil {
+		t.Fatal(err)
+	}
+	if c := reload(t, env2); c.SpotifySource != "web" {
+		t.Fatalf("source=%q", c.SpotifySource)
 	}
 }

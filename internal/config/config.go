@@ -22,6 +22,7 @@ import (
 // Valores aceitos nos campos de escolha.
 var (
 	Overwrites = []string{"skip", "metadata", "force"}
+	Sources    = []string{"web", "official"}
 	LyricsMode = []string{"embed", "lrc", "both", "off"}
 	Restricts  = []string{string(pathtpl.RestrictNone), string(pathtpl.RestrictASCII), string(pathtpl.RestrictStrict)}
 )
@@ -45,9 +46,15 @@ type Config struct {
 	YtDlp       string `toml:"yt_dlp"`
 	Cookies     string `toml:"cookies"`
 
+	SpotifySource       string `toml:"spotify_source"`
+	SpotifyGraphQLHash  string `toml:"spotify_graphql_hash"`
 	SpotifyClientID     string `toml:"spotify_client_id"`
 	SpotifyClientSecret string `toml:"spotify_client_secret"`
 }
+
+// Official informa se os metadados vêm da API oficial (com as credenciais
+// do usuário) em vez do web player.
+func (c Config) Official() bool { return c.SpotifySource == "official" }
 
 // Default devolve a configuração padrão.
 func Default() Config {
@@ -61,6 +68,8 @@ func Default() Config {
 		M3UName:   "{list-name}.m3u8",
 		Lyrics:    "embed",
 		Threads:   4,
+
+		SpotifySource: "web",
 	}
 }
 
@@ -151,6 +160,9 @@ func (c Config) Validate() error {
 		return err
 	}
 	if err := oneOf("lyrics", c.Lyrics, LyricsMode); err != nil {
+		return err
+	}
+	if err := oneOf("spotify_source", c.SpotifySource, Sources); err != nil {
 		return err
 	}
 	if c.Threads < 1 || c.Threads > 16 {
@@ -256,12 +268,24 @@ threads = {{.Threads}}
 yt_dlp = {{q .YtDlp}}
 cookies = {{q .Cookies}}
 
-# Opcional: app em https://developer.spotify.com/dashboard (Redirect URI
-# "http://127.0.0.1:8888/callback", API "Web API"). Com o Client ID e o login
-# da sua conta ("spotdown --login"), playlists suas ou colaborativas vêm
-# completas (sem o limite de 100 faixas); o secret é opcional e só serve
-# para ler faixas/álbuns sem login. Também lidos de SPOTIFY_CLIENT_ID e
-# SPOTIFY_CLIENT_SECRET.
+# De onde vêm as playlists do Spotify:
+#   "web"      — padrão, sem conta: o GraphQL interno do web player (o mesmo
+#                método do downtify) traz playlists inteiras de qualquer
+#                pessoa. Não é API pública e pode quebrar quando o Spotify
+#                atualizar o player; aí cai para o embed (até 100 faixas).
+#   "official" — a API oficial com o app e o login abaixo: só playlists suas
+#                ou colaborativas vêm completas (regra do Spotify desde 2026).
+spotify_source = {{q .SpotifySource}}
+
+# Hash da consulta fetchPlaylist do web player (vazio = o embutido). Só mexa
+# se aparecer "PersistedQueryNotFound": pegue o valor novo no código do web
+# player ou no do downtify (downtify/spotify.py, _GRAPHQL_HASH).
+spotify_graphql_hash = {{q .SpotifyGraphQLHash}}
+
+# Para spotify_source = "official": app em https://developer.spotify.com/dashboard
+# (Redirect URI "http://127.0.0.1:8888/callback", API "Web API") e o login
+# da sua conta ("spotdown --login"). O secret é opcional. Também lidos de
+# SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET.
 spotify_client_id = {{q .SpotifyClientID}}
 spotify_client_secret = {{q .SpotifyClientSecret}}
 `))

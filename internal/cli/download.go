@@ -36,6 +36,18 @@ func KindName(k spotify.Kind) string {
 	return "Faixa"
 }
 
+// SpotifyOptions monta o cliente do Spotify conforme a fonte escolhida: o
+// web player (padrão, sem credenciais) ou a API oficial com as do usuário.
+func SpotifyOptions(cfg config.Config) spotify.Options {
+	o := spotify.Options{CacheDir: config.CacheDir(), AlbumDetails: engine.NeedsAlbumDetails(cfg)}
+	if cfg.Official() {
+		o.ClientID, o.ClientSecret, o.TokenFile = cfg.SpotifyClientID, cfg.SpotifyClientSecret, config.TokenPath()
+	} else {
+		o.WebPlayer, o.GraphQLHash = true, cfg.SpotifyGraphQLHash
+	}
+	return o
+}
+
 // ValidateLinks confere um ou mais links separados por linha, espaço ou vírgula.
 func ValidateLinks(s string) error {
 	links := SplitLinks(s)
@@ -71,10 +83,7 @@ func Download(ctx context.Context, env *Env, urls []string, opt DownloadOptions)
 		}
 	}
 
-	sp := spotify.New(spotify.Options{
-		ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret,
-		TokenFile: config.TokenPath(), CacheDir: config.CacheDir(), AlbumDetails: engine.NeedsAlbumDetails(cfg),
-	})
+	sp := spotify.New(SpotifyOptions(cfg))
 	r := &reporter{u: u, base: pathtpl.ExpandPath(cfg.OutputDir)}
 	lists := engine.Resolve(ctx, sp, urls, r.handle)
 	u.Status("")

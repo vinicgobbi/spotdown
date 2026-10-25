@@ -46,7 +46,7 @@ func Login(ctx context.Context, env *Env) error {
 	u := env.UI
 	id := env.Cfg.SpotifyClientID
 	if id == "" {
-		return errors.New("falta o Client ID do app do Spotify (spotify_client_id no config.toml, ou Opções › API do Spotify)")
+		return errors.New("falta o Client ID do app do Spotify (spotify_client_id no config.toml, ou Opções › Fonte do Spotify)")
 	}
 	u.Println("Abrindo o navegador para você autorizar o spotdown na sua conta do Spotify…")
 	u.Status("Aguardando a autorização no navegador… (ctrl+c duas vezes cancela)")
@@ -66,7 +66,12 @@ func Login(ctx context.Context, env *Env) error {
 	if who == "" {
 		who = "sua conta"
 	}
-	u.OK("Conectado como %s. Playlists suas ou colaborativas agora vêm completas.", who)
+	u.OK("Conectado como %s.", who)
+	if env.Cfg.Official() {
+		u.Hint("Playlists suas ou colaborativas agora vêm completas pela API oficial.")
+	} else {
+		u.Hint("A fonte atual é o web player; o login só é usado com spotify_source = \"official\".")
+	}
 	return nil
 }
 
