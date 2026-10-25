@@ -1,3 +1,9 @@
+## v0.3.0 (2026-10-25)
+
+### Feat
+
+- **spotify**: login com a conta (PKCE) para playlists completas
+
 ## v0.2.0 (2026-10-25)
 
 ### BREAKING CHANGE
