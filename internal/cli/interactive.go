@@ -28,10 +28,9 @@ func Interactive(env *Env) error {
 	return tui.Run(env.UI, App(env))
 }
 
-// RedirectURI é a URL a cadastrar no app do Spotify. O spotdown não a usa (o
-// fluxo client credentials não tem redirect), mas o formulário exige uma, e
-// o Spotify recusa "localhost".
-const RedirectURI = "http://127.0.0.1:8888/callback"
+// RedirectURI é a URL a cadastrar no app do Spotify: o login volta para ela
+// (o spotdown escuta ali durante o login). O Spotify recusa "localhost".
+const RedirectURI = spotify.RedirectURI
 
 func onOff(b bool) string {
 	if b {
@@ -156,7 +155,7 @@ func App(env *Env) tui.App {
 					Label: "API do Spotify",
 					Run:   func(ctx context.Context) error { return iAPI(ctx, env) },
 					Desc:  func() string { return apiDesc(env) },
-					CLI:   "SPOTIFY_CLIENT_ID=... SPOTIFY_CLIENT_SECRET=... spotdown LINK",
+					CLI:   "spotdown --login  ·  spotdown --logout",
 				},
 			}},
 			{Title: "Sistema", Items: []tui.Item{
@@ -212,9 +211,9 @@ func settingsKV(env *Env) {
 	if c.M3U {
 		m3uText = c.M3UName
 	}
-	api := "não configurada (playlists até 100 faixas)"
-	if c.SpotifyClientID != "" && c.SpotifyClientSecret != "" {
-		api = "configurada"
+	api := "sem login (playlists até 100 faixas)"
+	if who := LoggedUser(env); who != "" {
+		api = "conectada como " + who
 	}
 	env.UI.KV(
 		[2]string{"Destino", Tilde(filepath.Join(pathtpl.ExpandPath(c.OutputDir), c.Output))},
@@ -440,22 +439,32 @@ func iThreads(env *Env) error {
 	return nil
 }
 
-func apiConfigured(c config.Config) bool {
-	return c.SpotifyClientID != "" && c.SpotifyClientSecret != ""
-}
+func apiConfigured(c config.Config) bool { return c.SpotifyClientID != "" }
 
 func apiDesc(env *Env) string {
 	var b strings.Builder
-	if apiConfigured(env.Cfg) {
-		id := env.Cfg.SpotifyClientID
-		fmt.Fprintf(&b, "Configurada (Client ID %s…).", id[:min(6, len(id))])
+	c := env.Cfg
+	app, conta, secret := "não configurado", "não conectada", "não (opcional)"
+	if c.SpotifyClientID != "" {
+		app = "Client ID " + c.SpotifyClientID[:min(6, len(c.SpotifyClientID))] + "…"
 		if os.Getenv("SPOTIFY_CLIENT_ID") != "" {
-			b.WriteString(" As credenciais vêm das variáveis de ambiente, que têm prioridade sobre o arquivo.")
+			app += " (da variável de ambiente)"
 		}
-	} else {
-		b.WriteString("Não configurada: sem login, o Spotify só libera as primeiras 100 faixas de uma playlist.")
 	}
-	b.WriteString("\n\nCom as credenciais de um app (grátis, sem login de usuário) vêm a playlist inteira, o ISRC e o gênero. Para criar:\n\n")
+	if who := LoggedUser(env); who != "" {
+		conta = "conectada como " + who
+	}
+	if c.SpotifyClientSecret != "" {
+		secret = "configurado"
+	}
+	b.WriteString(tui.Capture(env.UI, func() {
+		env.UI.KV([2]string{"App", app}, [2]string{"Conta", conta}, [2]string{"Secret", secret})
+	}))
+	b.WriteString("\n\nSem login, o Spotify só libera as primeiras 100 faixas de uma playlist. Entrando com a sua conta, " +
+		"playlists suas ou colaborativas vêm completas.\n\n" +
+		"Playlists de outras pessoas continuam limitadas a 100: desde fevereiro de 2026 o Spotify não entrega mais " +
+		"o conteúdo delas pela API a apps pessoais (Development Mode). Esses apps também exigem que o dono tenha Premium.\n\n" +
+		"Para criar o app:\n\n")
 	b.WriteString(tui.Capture(env.UI, func() { apiSteps(env.UI) }))
 	return b.String()
 }
@@ -464,9 +473,10 @@ func apiSteps(u *ui.UI) {
 	steps := []string{
 		"Abra https://developer.spotify.com/dashboard e clique em Create app.",
 		"Nome e descrição: qualquer texto.",
-		"Redirect URIs: " + RedirectURI + " (clique em Add). O spotdown não usa, mas o formulário exige; \"localhost\" é recusado.",
+		"Redirect URIs: " + RedirectURI + " (clique em Add). Tem que ser exatamente esta; \"localhost\" é recusado.",
 		"Em \"Which API/SDKs\", marque Web API, aceite os termos e salve.",
-		"Em Settings, copie o Client ID e, em View client secret, o Client secret.",
+		"Em Settings, copie o Client ID (o secret é opcional).",
+		"Aqui, escolha \"Entrar com a conta do Spotify\" e autorize no navegador.",
 	}
 	for i, s := range steps {
 		u.Printf("  %d. %s\n", i+1, s)
@@ -475,50 +485,75 @@ func apiSteps(u *ui.UI) {
 
 func iAPI(ctx context.Context, env *Env) error {
 	u := env.UI
+	opts := []huh.Option[string]{huh.NewOption("Entrar com a conta do Spotify", "login")}
+	if apiConfigured(env.Cfg) {
+		opts = append(opts, huh.NewOption("Trocar o Client ID / secret", "app"))
+	} else {
+		opts = append(opts, huh.NewOption("Informar o Client ID / secret", "app"))
+	}
+	if LoggedUser(env) != "" {
+		opts = append(opts, huh.NewOption("Sair da conta", "logout"))
+	}
 	if apiConfigured(env.File) {
-		what := "change"
-		if err := u.Select("API do Spotify", &what,
-			huh.NewOption("Trocar as credenciais", "change"),
-			huh.NewOption("Remover as credenciais", "remove"),
-		); err != nil {
+		opts = append(opts, huh.NewOption("Remover o app e o login", "remove"))
+	}
+	what := "login"
+	if err := u.Select("API do Spotify", &what, opts...); err != nil {
+		return err
+	}
+	switch what {
+	case "logout":
+		return Logout(env)
+	case "remove":
+		if err := env.Save(func(c *config.Config) { c.SpotifyClientID, c.SpotifyClientSecret = "", "" }); err != nil {
 			return err
 		}
-		if what == "remove" {
-			if err := env.Save(func(c *config.Config) { c.SpotifyClientID, c.SpotifyClientSecret = "", "" }); err != nil {
-				return err
-			}
-			u.OK("Credenciais removidas.")
-			return nil
-		}
-	} else {
-		u.Println("Crie o app antes de continuar:")
+		return Logout(env)
+	case "app":
+		return iAPIApp(ctx, env)
+	}
+	if !apiConfigured(env.Cfg) {
+		u.Println("Primeiro, crie o app do Spotify:")
 		apiSteps(u)
 		u.Println()
-	}
-	var id, secret string
-	nonEmpty := func(s string) error {
-		if strings.TrimSpace(s) == "" {
-			return errors.New("obrigatório")
+		if err := iAPIApp(ctx, env); err != nil {
+			return err
 		}
-		return nil
+		u.Println()
 	}
+	return Login(ctx, env)
+}
+
+// iAPIApp pede o Client ID e, opcionalmente, o secret (testado antes de gravar).
+func iAPIApp(ctx context.Context, env *Env) error {
+	u := env.UI
+	id, secret := env.File.SpotifyClientID, env.File.SpotifyClientSecret
 	if err := u.Run(huh.NewGroup(
-		huh.NewInput().Title("Client ID").Value(&id).Validate(nonEmpty),
-		huh.NewInput().Title("Client secret").EchoMode(huh.EchoModePassword).Value(&secret).Validate(nonEmpty),
+		huh.NewInput().Title("Client ID").Value(&id).Validate(func(s string) error {
+			if strings.TrimSpace(s) == "" {
+				return errors.New("obrigatório")
+			}
+			return nil
+		}),
+		huh.NewInput().Title("Client secret (opcional)").
+			Description("Só serve para ler faixas e álbuns pela API sem login; deixe vazio se não quiser.").
+			EchoMode(huh.EchoModePassword).Value(&secret),
 	)); err != nil {
 		return err
 	}
 	id, secret = strings.TrimSpace(id), strings.TrimSpace(secret)
-	u.Status("Testando as credenciais…")
-	err := spotify.CheckCredentials(ctx, id, secret)
-	u.Status("")
-	if err != nil {
-		return err
+	if secret != "" {
+		u.Status("Testando o Client ID e o secret…")
+		err := spotify.CheckCredentials(ctx, id, secret)
+		u.Status("")
+		if err != nil {
+			return err
+		}
 	}
 	if err := env.Save(func(c *config.Config) { c.SpotifyClientID, c.SpotifyClientSecret = id, secret }); err != nil {
 		return err
 	}
-	u.OK("Credenciais válidas e gravadas em %s.", env.ConfigPath)
+	u.OK("App do Spotify gravado em %s.", Tilde(env.ConfigPath))
 	return nil
 }
 

@@ -73,7 +73,7 @@ func Download(ctx context.Context, env *Env, urls []string, opt DownloadOptions)
 
 	sp := spotify.New(spotify.Options{
 		ClientID: cfg.SpotifyClientID, ClientSecret: cfg.SpotifyClientSecret,
-		CacheDir: config.CacheDir(), AlbumDetails: engine.NeedsAlbumDetails(cfg),
+		TokenFile: config.TokenPath(), CacheDir: config.CacheDir(), AlbumDetails: engine.NeedsAlbumDetails(cfg),
 	})
 	r := &reporter{u: u, base: pathtpl.ExpandPath(cfg.OutputDir)}
 	lists := engine.Resolve(ctx, sp, urls, r.handle)

@@ -30,6 +30,8 @@ type options struct {
 	configPath string
 	dryRun     bool
 	save       bool
+	login      bool
+	logout     bool
 	version    bool
 	vars       bool
 }
@@ -53,6 +55,8 @@ func parseFlags(o *options) (urls []string) {
 	fs.StringVar(&c.YtDlp, "yt-dlp", c.YtDlp, "caminho do yt-dlp")
 	fs.StringVar(&c.Cookies, "cookies", c.Cookies, "cookies.txt para o yt-dlp (opcional)")
 	fs.BoolVar(&o.dryRun, "dry-run", false, "só listar as faixas e os caminhos que seriam gerados, sem baixar")
+	fs.BoolVar(&o.login, "login", false, "entrar com a conta do Spotify (playlists suas ou colaborativas sem o limite de 100 faixas) e sair")
+	fs.BoolVar(&o.logout, "logout", false, "apagar o login do Spotify e sair")
 	fs.BoolVar(&o.save, "save-config", false, "gravar as opções passadas por flag no arquivo de configuração")
 	fs.BoolVar(&o.vars, "vars", false, "listar as variáveis do template e sair")
 	fs.BoolVar(&o.version, "version", false, "mostrar a versão e sair")
@@ -137,6 +141,22 @@ func run() int {
 	o.cfg.ApplyEnv()
 
 	env := &cli.Env{UI: ui.New(), Cfg: o.cfg, File: file, ConfigPath: o.configPath, Version: version}
+
+	if o.login || o.logout {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		var err error
+		if o.logout {
+			err = cli.Logout(env)
+		} else {
+			err = cli.Login(ctx, env)
+		}
+		if err != nil {
+			fmt.Fprintln(os.Stderr, ui.ErrorText(err.Error()))
+			return 1
+		}
+		return 0
+	}
 
 	if len(urls) == 0 {
 		if !env.UI.Interactive {

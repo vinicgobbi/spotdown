@@ -14,28 +14,46 @@ import (
 	"github.com/vinicgobbi/spotdown/internal/track"
 )
 
-// api é o cliente da API Web oficial, usado só quando o usuário configura
-// Client ID/Secret (fluxo client credentials, sem login). Ela não tem o limite
-// de 100 faixas do embed e traz ISRC, disco e gravadora direto.
+// api é o cliente da API Web oficial, usado quando o usuário configura um
+// app do Spotify. Com login (user), lê as playlists dele sem o limite de 100
+// faixas do embed; só com Client ID/Secret (client credentials, sem
+// usuário), lê faixas e álbuns, mas não o conteúdo de playlists.
 type api struct {
 	hc           *http.Client
 	lim          *limiter
 	id, secret   string
+	user         *userAuth
 	mu           sync.Mutex
 	token        string
 	tokenExpires time.Time
 }
 
-const apiBase = "https://api.spotify.com/v1"
+// apiBase e appTokenURL são variáveis só para os testes apontarem para um servidor falso.
+var (
+	apiBase     = "https://api.spotify.com/v1"
+	appTokenURL = "https://accounts.spotify.com/api/token"
+)
 
+// auth devolve o token do usuário logado ou, sem login, o do app.
 func (a *api) auth(ctx context.Context) (string, error) {
+	if a.user != nil {
+		tok, err := a.user.access(ctx, a.hc)
+		if err == nil || a.secret == "" {
+			return tok, err
+		}
+		// Login vencido/revogado: o token do app ainda serve para faixas e álbuns.
+	}
+	return a.appToken(ctx)
+}
+
+func (a *api) appToken(ctx context.Context) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.token != "" && time.Until(a.tokenExpires) > time.Minute {
 		return a.token, nil
 	}
 	form := url.Values{"grant_type": {"client_credentials"}}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://accounts.spotify.com/api/token", strings.NewReader(form.Encode()))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, appTokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
 		return "", err
 	}
@@ -69,7 +87,7 @@ func (a *api) get(ctx context.Context, path string, v any) error {
 		return err
 	}
 	u := path
-	if !strings.HasPrefix(u, "https://") {
+	if !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") {
 		u = apiBase + path
 	}
 	body, err := get(ctx, a.hc, a.lim, u, http.Header{"Authorization": {"Bearer " + tok}})
@@ -129,9 +147,11 @@ func (p *apiPage) tracks(wrapped bool) []apiTrack {
 	for _, raw := range p.Items {
 		var t apiTrack
 		if wrapped {
+			// Na API nova a faixa vem em "item" e "track" virou booleano;
+			// na antiga, "track" é a faixa. Lido como bruto para aceitar os dois.
 			var w struct {
-				Track *apiTrack `json:"track"`
-				Item  *apiTrack `json:"item"`
+				Track json.RawMessage `json:"track"`
+				Item  *apiTrack       `json:"item"`
 			}
 			if json.Unmarshal(raw, &w) != nil {
 				continue
@@ -139,8 +159,10 @@ func (p *apiPage) tracks(wrapped bool) []apiTrack {
 			switch {
 			case w.Item != nil:
 				t = *w.Item
-			case w.Track != nil:
-				t = *w.Track
+			case len(w.Track) > 0 && w.Track[0] == '{':
+				if json.Unmarshal(w.Track, &t) != nil {
+					continue
+				}
 			default:
 				continue
 			}
@@ -225,8 +247,11 @@ func (a *api) album(ctx context.Context, id string) (*apiAlbum, []apiTrack, erro
 	return &al, tracks, nil
 }
 
-// playlist devolve o nome e todas as faixas da playlist. Tenta o endpoint
-// novo (/items) e cai para o antigo (/tracks).
+// ErrPlaylistRestricted: a API não entrega o conteúdo desta playlist (apps
+// em Development Mode só leem playlists do usuário logado ou colaborativas).
+var ErrPlaylistRestricted = errors.New("playlist restrita")
+
+// playlist devolve o nome e todas as faixas da playlist (de 100 em 100).
 func (a *api) playlist(ctx context.Context, id string) (string, []apiTrack, error) {
 	var meta struct {
 		Name string `json:"name"`
@@ -235,27 +260,24 @@ func (a *api) playlist(ctx context.Context, id string) (string, []apiTrack, erro
 		return "", nil, err
 	}
 	var tracks []apiTrack
-	for _, ep := range []string{"items", "tracks"} {
-		next := fmt.Sprintf("/playlists/%s/%s?limit=100", id, ep)
-		tracks = tracks[:0]
-		var err error
-		for next != "" {
-			var page apiPage
-			if err = a.get(ctx, next, &page); err != nil {
-				break
+	next := fmt.Sprintf("/playlists/%s/items?limit=100", id)
+	for next != "" {
+		var page apiPage
+		if err := a.get(ctx, next, &page); err != nil {
+			var se *StatusError
+			if errors.As(err, &se) && (se.Code == http.StatusUnauthorized || se.Code == http.StatusForbidden || se.Code == http.StatusNotFound) {
+				return "", nil, ErrPlaylistRestricted
 			}
-			tracks = append(tracks, page.tracks(true)...)
-			next = page.Next
-		}
-		var se *StatusError
-		if err == nil {
-			return meta.Name, tracks, nil
-		}
-		if !errors.As(err, &se) || se.Code != http.StatusNotFound {
 			return "", nil, err
 		}
+		tracks = append(tracks, page.tracks(true)...)
+		next = page.Next
 	}
-	return "", nil, fmt.Errorf("API do Spotify: playlist não encontrada (playlists editoriais do Spotify não são liberadas para apps novos)")
+	if len(tracks) == 0 {
+		// Playlist de outra pessoa: vem só o cabeçalho, sem "items".
+		return "", nil, ErrPlaylistRestricted
+	}
+	return meta.Name, tracks, nil
 }
 
 // CheckCredentials confere Client ID/Secret pedindo um token à API.

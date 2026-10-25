@@ -6,6 +6,7 @@ package spotify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -42,16 +43,15 @@ type Client struct {
 }
 
 type albumEntry struct {
-	once  sync.Once
-	page  *pageAlbum
-	api   *apiAlbum
-	discs int
-	err   error
+	once sync.Once
+	page *pageAlbum
+	err  error
 }
 
 // Options configura o cliente.
 type Options struct {
 	ClientID, ClientSecret string // vazios = só páginas públicas
+	TokenFile              string // login do usuário (ver Login); vazio = sem login
 	CacheDir               string // vazio = sem cache em disco
 	// AlbumDetails pede, na API, a consulta extra ao álbum de cada faixa
 	// (gravadora, gênero, quantidade de discos). Sem ela, os dados de álbum
@@ -75,11 +75,21 @@ func New(o Options) *Client {
 		albumExtra: o.AlbumDetails,
 		albums:     map[string]*albumEntry{},
 	}
-	if o.ClientID != "" && o.ClientSecret != "" {
-		c.api = &api{hc: c.hc, lim: newLimiter(apiEvery), id: o.ClientID, secret: o.ClientSecret}
+	var user *userAuth
+	if o.TokenFile != "" && o.ClientID != "" {
+		// Token de outro app (Client ID trocado) não vale.
+		if tok, err := LoadToken(o.TokenFile); err == nil && tok != nil && tok.ClientID == o.ClientID {
+			user = &userAuth{tok: tok, path: o.TokenFile}
+		}
+	}
+	if o.ClientID != "" && (o.ClientSecret != "" || user != nil) {
+		c.api = &api{hc: c.hc, lim: newLimiter(apiEvery), id: o.ClientID, secret: o.ClientSecret, user: user}
 	}
 	return c
 }
+
+// LoggedIn informa se há login de usuário (necessário para playlists completas).
+func (c *Client) LoggedIn() bool { return c.api != nil && c.api.user != nil }
 
 // HasAPI informa se a API oficial está configurada.
 func (c *Client) HasAPI() bool { return c.api != nil }
@@ -236,6 +246,7 @@ func (c *Client) resolveAlbum(ctx context.Context, id string) (*List, error) {
 				t := at.track()
 				al.apply(&t)
 				t.DiscCount = discs
+				c.applyAPIAlbum(ctx, &t)
 				l.Tracks = append(l.Tracks, t)
 			}
 			return l, nil
@@ -262,6 +273,7 @@ func (c *Client) resolveAlbum(ctx context.Context, id string) (*List, error) {
 
 func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(int, int)) (*List, error) {
 	var warnings []string
+	restricted := false
 	if c.api != nil {
 		name, tracks, err := c.api.playlist(ctx, id)
 		if err == nil {
@@ -282,7 +294,11 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		warnings = append(warnings, err.Error()+" — usando a página pública")
+		if errors.Is(err, ErrPlaylistRestricted) {
+			restricted = true
+		} else {
+			warnings = append(warnings, "API do Spotify: "+err.Error()+" — usando a página pública")
+		}
 	}
 
 	body, err := c.page(ctx, "embed/playlist/"+id)
@@ -303,9 +319,14 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 			}
 		}
 		if l.Total > len(l.Tracks) {
-			l.Warnings = append(l.Warnings, fmt.Sprintf(
-				"o Spotify só libera as primeiras %d de %d faixas sem login; configure spotify_client_id/spotify_client_secret para a playlist completa",
-				len(l.Tracks), l.Total))
+			w := fmt.Sprintf("a página pública só traz as primeiras %d de %d faixas", len(l.Tracks), l.Total)
+			switch {
+			case !c.LoggedIn():
+				w += "; se a playlist for sua ou colaborativa, entre com a conta do Spotify (Opções › API do Spotify, ou spotdown --login)"
+			case restricted:
+				w += "; a API do Spotify só entrega playlists suas ou colaborativas, e esta não é"
+			}
+			l.Warnings = append(l.Warnings, w)
 		}
 	}
 
@@ -328,39 +349,15 @@ func (c *Client) resolvePlaylist(ctx context.Context, id string, progress func(i
 	return l, nil
 }
 
-// applyAPIAlbum completa a faixa com gravadora, gênero e contagem de discos do álbum.
+// applyAPIAlbum completa a faixa vinda da API com a página pública do álbum
+// (gravadora, disco, quantidade de discos, artista do álbum): desde 2026 a
+// API não traz mais a gravadora. Só quando o template pede (albumExtra).
 func (c *Client) applyAPIAlbum(ctx context.Context, t *track.Track) {
 	if !c.albumExtra || t.AlbumID == "" {
 		return
 	}
-	e := c.albumEntry("api:" + t.AlbumID)
-	e.once.Do(func() {
-		var cached struct {
-			Album *apiAlbum
-			Discs int
-		}
-		if c.cache.get("api-album-"+t.AlbumID, &cached) && cached.Album != nil {
-			e.api, e.discs = cached.Album, cached.Discs
-			return
-		}
-		al, tracks, err := c.api.album(ctx, t.AlbumID)
-		if err != nil {
-			e.err = err
-			return
-		}
-		e.api = al
-		for _, tr := range tracks {
-			e.discs = max(e.discs, tr.DiscNumber)
-		}
-		cached.Album, cached.Discs = al, e.discs
-		c.cache.put("api-album-"+t.AlbumID, cached)
-	})
-	if e.err != nil {
-		return
-	}
-	e.api.apply(t)
-	if e.discs > 0 {
-		t.DiscCount = e.discs
+	if e := c.albumPage(ctx, t.AlbumID); e.err == nil {
+		e.page.apply(t)
 	}
 }
 

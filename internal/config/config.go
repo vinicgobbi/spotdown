@@ -86,6 +86,15 @@ func Path() (string, error) {
 	return filepath.Join(dir, "spotdown", "config.toml"), nil
 }
 
+// TokenPath devolve onde fica o login do Spotify (token do usuário).
+func TokenPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "spotdown", "spotify-token.json")
+}
+
 // CacheDir devolve a pasta do cache de metadados.
 func CacheDir() string {
 	dir, err := os.UserCacheDir()
@@ -247,11 +256,12 @@ threads = {{.Threads}}
 yt_dlp = {{q .YtDlp}}
 cookies = {{q .Cookies}}
 
-# Opcional: credenciais de um app em https://developer.spotify.com/dashboard
-# (fluxo client credentials, sem login). Liberam playlists com mais de 100
-# faixas e trazem ISRC. Também lidas de SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET.
-# Ao criar o app: Redirect URI "http://127.0.0.1:8888/callback" (obrigatória
-# no formulário, mas nunca usada; "localhost" é recusado) e API "Web API".
+# Opcional: app em https://developer.spotify.com/dashboard (Redirect URI
+# "http://127.0.0.1:8888/callback", API "Web API"). Com o Client ID e o login
+# da sua conta ("spotdown --login"), playlists suas ou colaborativas vêm
+# completas (sem o limite de 100 faixas); o secret é opcional e só serve
+# para ler faixas/álbuns sem login. Também lidos de SPOTIFY_CLIENT_ID e
+# SPOTIFY_CLIENT_SECRET.
 spotify_client_id = {{q .SpotifyClientID}}
 spotify_client_secret = {{q .SpotifyClientSecret}}
 `))

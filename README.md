@@ -58,9 +58,9 @@ Teclas: `↑↓` navega, `enter` abre e `q` sai. Durante uma ação, `ctrl+c` du
 | `{disc-number}` / `{disc-count}` | disco / quantidade de discos |
 | `{year}` / `{original-date}` | ano / data (AAAA-MM-DD) |
 | `{duration}` | duração em segundos |
-| `{isrc}` | ISRC (só com a API do Spotify) |
+| `{isrc}` | ISRC (só pela API do Spotify) |
 | `{publisher}` | gravadora |
-| `{genre}` | gênero (só com a API do Spotify, e raro) |
+| `{genre}` | gênero (quase nunca disponível) |
 | `{track-id}` | ID da faixa no Spotify |
 | `{list-name}` / `{list-position}` / `{list-length}` | nome, posição e tamanho do álbum/playlist baixado |
 | `{output-ext}` | extensão (`mp3`, `m4a`...) |
@@ -88,27 +88,36 @@ O arquivo fica em `~/.config/spotdown/config.toml` e é criado na primeira execu
 
 ### Playlists com mais de 100 faixas
 
-Sem login, o Spotify só libera as **primeiras 100 faixas** de uma playlist pela página pública. O spotdown avisa quando isso acontece. Para pegar a playlist completa, além do ISRC e do gênero, crie um app gratuito em <https://developer.spotify.com/dashboard>:
+Sem login, o Spotify só libera as **primeiras 100 faixas** de uma playlist pela página pública. O spotdown avisa quando isso acontece.
 
-1. Clique em **Create app** e preencha nome e descrição (qualquer texto).
-2. Em **Redirect URIs**, coloque `http://127.0.0.1:8888/callback` e clique em **Add**. O spotdown nunca usa essa URL, porque o fluxo *client credentials* não tem redirect, mas o formulário exige uma. O Spotify não aceita `localhost`: use o IP `127.0.0.1` ou uma URL `https://`.
+Para **playlists suas ou colaborativas**, dá para pegar a playlist inteira entrando com a sua conta do Spotify. Para playlists de outras pessoas não há saída: desde [fevereiro de 2026](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide), o Spotify não entrega mais o conteúdo delas pela API a apps pessoais (*Development Mode*). Elas continuam limitadas a 100 faixas.
+
+1. Em <https://developer.spotify.com/dashboard>, clique em **Create app** e preencha nome e descrição (qualquer texto).
+2. Em **Redirect URIs**, coloque exatamente `http://127.0.0.1:8888/callback` e clique em **Add**. O login volta para esse endereço, e o spotdown escuta ali enquanto você entra. O Spotify não aceita `localhost`.
 3. Em **Which API/SDKs are you planning to use?**, marque **Web API**, aceite os termos e salve.
-4. Em **Settings**, copie o **Client ID** e, em **View client secret**, o **Client secret**.
+4. Em **Settings**, copie o **Client ID**. O secret é opcional.
+5. Entre com a conta: na interface, em **Opções › API do Spotify › Entrar com a conta do Spotify**, ou no terminal:
 
-Depois, configure as credenciais:
+   ```sh
+   spotdown --login     # abre o navegador; autorize e volte ao terminal
+   spotdown --logout    # apaga o login
+   ```
 
-```toml
-spotify_client_id = "..."
-spotify_client_secret = "..."
-```
+O login usa o fluxo *Authorization Code + PKCE*, que não precisa do secret, e pede só permissão para ler suas playlists (`playlist-read-private` e `playlist-read-collaborative`). O token fica em `~/.config/spotdown/spotify-token.json` e é renovado sozinho.
 
-Isso também pode ser feito na interface, em **Opções › API do Spotify**, que testa as credenciais antes de gravar. Também dá para usar as variáveis `SPOTIFY_CLIENT_ID` e `SPOTIFY_CLIENT_SECRET`, que não são gravadas no arquivo.
+Duas exigências do Spotify para apps em *Development Mode*:
 
-Esse é o fluxo *client credentials* da API oficial, sem login de usuário. Para economizar requisições, a consulta extra a cada álbum (que traz gravadora, gênero e quantidade de discos) só é feita quando o template usa `{publisher}`, `{disc-count}` ou `{genre}`.
+- **O dono do app precisa ter Spotify Premium.**
+- Se outra pessoa for usar o seu app, cadastre a conta dela em **User Management**.
+
+O Client ID também pode ficar no config (`spotify_client_id`) ou nas variáveis `SPOTIFY_CLIENT_ID`/`SPOTIFY_CLIENT_SECRET`. O secret, se você informar, permite ler faixas e álbuns pela API sem login, o que traz o ISRC.
+
+Para economizar requisições, a consulta extra à página de cada álbum (gravadora, quantidade de discos) só é feita quando o template usa `{publisher}`, `{disc-count}` ou `{genre}`.
 
 ## Arquivos
 
 - `~/.config/spotdown/config.toml`: configuração (permissão 0600, porque pode guardar o Client Secret).
+- `~/.config/spotdown/spotify-token.json`: login do Spotify (permissão 0600). Apague com `spotdown --logout`.
 - `~/.cache/spotdown/meta/`: cache de metadados. Pode apagar à vontade.
 - `<output_dir>/spotdown-falhas.txt`: faixas sem correspondência ou com erro na última execução, com o link do Spotify.
 
