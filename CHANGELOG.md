@@ -1,3 +1,9 @@
+## v0.5.0 (2026-10-25)
+
+### Feat
+
+- instalar no PATH e procurar atualizações
+
 ## v0.4.0 (2026-10-25)
 
 ### Feat
