@@ -84,7 +84,14 @@ O arquivo fica em `~/.config/spotdown/config.toml` e é criado na primeira execu
 
 ### Playlists com mais de 100 faixas
 
-Sem login, o Spotify só libera as **primeiras 100 faixas** de uma playlist pela página pública. O spotdown avisa quando isso acontece. Para pegar a playlist completa, além do ISRC e do gênero, crie um app gratuito em <https://developer.spotify.com/dashboard> e configure as credenciais:
+Sem login, o Spotify só libera as **primeiras 100 faixas** de uma playlist pela página pública. O spotdown avisa quando isso acontece. Para pegar a playlist completa, além do ISRC e do gênero, crie um app gratuito em <https://developer.spotify.com/dashboard>:
+
+1. Clique em **Create app** e preencha nome e descrição (qualquer texto).
+2. Em **Redirect URIs**, coloque `http://127.0.0.1:8888/callback` e clique em **Add**. O spotdown nunca usa essa URL, porque o fluxo *client credentials* não tem redirect, mas o formulário exige uma. O Spotify não aceita `localhost`: use o IP `127.0.0.1` ou uma URL `https://`.
+3. Em **Which API/SDKs are you planning to use?**, marque **Web API**, aceite os termos e salve.
+4. Em **Settings**, copie o **Client ID** e, em **View client secret**, o **Client secret**.
+
+Depois, configure as credenciais:
 
 ```toml
 spotify_client_id = "..."

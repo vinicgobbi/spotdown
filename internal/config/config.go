@@ -250,6 +250,8 @@ cookies = {{q .Cookies}}
 # Opcional: credenciais de um app em https://developer.spotify.com/dashboard
 # (fluxo client credentials, sem login). Liberam playlists com mais de 100
 # faixas e trazem ISRC. Também lidas de SPOTIFY_CLIENT_ID/SPOTIFY_CLIENT_SECRET.
+# Ao criar o app: Redirect URI "http://127.0.0.1:8888/callback" (obrigatória
+# no formulário, mas nunca usada; "localhost" é recusado) e API "Web API".
 spotify_client_id = {{q .SpotifyClientID}}
 spotify_client_secret = {{q .SpotifyClientSecret}}
 `))
